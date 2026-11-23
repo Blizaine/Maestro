@@ -5,6 +5,10 @@ from mmgp import offload
 import torch.nn.functional as F
 import warnings
 
+from shared import sagegp_runtime
+
+sagegp_runtime.activate_overlay()
+
 
 def _cuda_capability(device=None):
     """Return the active CUDA capability, or a safe CPU-only sentinel."""
@@ -67,7 +71,7 @@ except ImportError:
     block_sparse_sage2_attn_cuda = None
     if not triton_installed: 
         try:
-            sg2_version = version("sageattention")
+            sg2_version = sagegp_runtime.sageattention_version()
             print("Sage Attention has been detected but it won't work until Triton is installed.")
         except ImportError:
             pass
@@ -85,7 +89,7 @@ except ImportError:
     _sage2_staged_settings = None
     if not triton_installed: 
         try:
-            sg2_version = version("sageattention")
+            sg2_version = sagegp_runtime.sageattention_version()
             if not triton_installed: print("Sage Attention 2 has been detected but it won't work until Triton is installed.")
         except ImportError:
             pass
@@ -179,6 +183,8 @@ def sdpa_wrapper(
         attention_length,
         attention_mask = None,
         causal = False,
+        softmax_scale = None,
+        dropout_p = 0.,
     ):
     q, k, v = qkv_list
 
@@ -201,7 +207,10 @@ def sdpa_wrapper(
                 dtype=q.dtype,
             )
         attention_mask = attention_mask.transpose(1,2)
-    o = F.scaled_dot_product_attention(q, k, v, attn_mask=attention_mask, is_causal=causal).transpose(1,2)
+    o = F.scaled_dot_product_attention(
+        q, k, v, attn_mask=attention_mask, is_causal=causal,
+        scale=softmax_scale, dropout_p=dropout_p,
+    ).transpose(1,2)
     del q, k ,v
     qkv_list.clear()
 
@@ -268,15 +277,15 @@ def get_attention_modes():
         ret.append("xformers")
     if sageattn_varlen_wrapper != None:
         ret.append("sage")
-    if sageattn2 != None and version("sageattention").startswith("2") :
+    if sageattn2 is not None and sagegp_runtime.sageattention_version().startswith("2"):
         ret.append("sage2")
-    if block_sparse_sage2_attn_cuda != None and version("sageattention").startswith("2") :
+    if block_sparse_sage2_attn_cuda is not None and sagegp_runtime.sageattention_version().startswith("2"):
         ret.append("radial")
 
     if sageattn3 != None: # and version("sageattention").startswith("3") :
         ret.append("sage3")
         
-    return ret
+    return ret + list(sagegp_runtime.available_modes())
 
 def get_supported_attention_modes():
     ret = get_attention_modes()
@@ -506,6 +515,8 @@ def pay_attention(
     # format : torch.Size([batches, tokens, heads, head_features])
     # assume if q_lens is non null, each q is padded up to lq (one q out of two will need to be discarded or ignored)
     # assume if k_lens is non null, each k is padded up to lk (one k out of two will need to be discarded or ignored)
+    requested = offload.shared_state.get("_attention", "sdpa") if force_attention is None else force_attention
+    use_sagegp = requested in sagegp_runtime.MODES
     if attention_mask != None:
         force_attention = "sdpa"
         if  attention_mask.dtype == torch.bfloat16 and not bfloat16_supported:
@@ -533,6 +544,20 @@ def pay_attention(
     batch = len(q)
     if len(k) != batch: k = k.expand(batch, -1, -1, -1)
     if len(v) != batch: v = v.expand(batch, -1, -1, -1)
+    if use_sagegp:
+        dense_call = (
+            attention_mask is None and not causal and not dropout_p
+            and softmax_scale is None and window_size == (-1, -1)
+            and q_lens is None and k_lens is None
+        )
+        if dense_call:
+            result = sagegp_runtime.attend_dense(requested, q, k, v)
+            if result is not None:
+                return result.to(out_dtype)
+        if dense_call and q.is_cuda and sage2_supported and sageattn2 is not None:
+            attn = "sage2"
+        else:
+            attn = "flash" if window_size != (-1, -1) and attention_mask is None and flash_attn_kernels_available() else "sdpa"
     if attn == "chipmunk":
         from src.chipmunk.modules import SparseDiffMlp, SparseDiffAttn
         from src.chipmunk.util import LayerCounter, GLOBAL_CONFIG
@@ -632,7 +657,10 @@ def pay_attention(
     elif attn=="sdpa":
         qkv_list = [q, k, v]
         del q ,k ,v
-        x = sdpa_wrapper(qkv_list, lq, attention_mask=attention_mask, causal=causal) #.unsqueeze(0)
+        x = sdpa_wrapper(
+            qkv_list, lq, attention_mask=attention_mask, causal=causal,
+            softmax_scale=softmax_scale, dropout_p=dropout_p,
+        )
     elif attn=="flash" and version == 3:
         x = flash_attn_interface.flash_attn_varlen_func(
             q=q,

@@ -5,6 +5,12 @@ import { fetchModelOptions, fetchWriterDrafts, getFileUrl, updateClipPrompt } fr
 import { LoadWriterDraftHistory } from '../WriterDraftHistory'
 import type { PipelineClipState, SavedPipelineState } from '../../types'
 import { createDirectorFinal, inspectDirectorShot, selectDirectorShotTake, type DirectorShotInspection, type DirectorTake } from './directorDraftFinalApi'
+import { DirectorDeliveryPanel } from './DirectorDeliveryPanel'
+import {
+  getDirectorShowrunnerInfo,
+  updateDirectorBoundaryAnchors,
+  type DirectorShowrunnerInfo,
+} from './directorShowrunnerApi'
 import type { ModelOptions, ResolutionPreset } from '../../types'
 
 /** Safely coerce any value to a displayable string */
@@ -50,6 +56,10 @@ function formatDate(ts: number): string {
 type ReviewablePipelineClip = PipelineClipState & {
   takes?: DirectorTake[]
   selected_take_id?: string | null
+  start_from_previous?: boolean
+  end_on_next?: boolean
+  start_anchor_filename?: string | null
+  end_anchor_filename?: string | null
 }
 
 type DraftFinalPipeline = SavedPipelineState & {
@@ -390,14 +400,16 @@ function LlmLogPanel({ pipeline }: { pipeline: SavedPipelineState }) {
   )
 }
 
-function ClipCard({ clip, pipeline, busy = false, onTag, onRerunImage, onRerunVideo, onSavePrompt, onTakeSelected }: {
+function ClipCard({ clip, pipeline, busy = false, boundaryAnchorsEnabled = false, onTag, onRerunImage, onRerunVideo, onSavePrompt, onSaveAnchors, onTakeSelected }: {
   clip: ReviewablePipelineClip
   pipeline: SavedPipelineState
   busy?: boolean
+  boundaryAnchorsEnabled?: boolean
   onTag: (tag: 'good' | 'needs_work' | null) => void
   onRerunImage: (clipIndex: number, prompt?: string) => void
   onRerunVideo: (clipIndex: number, prompt?: string) => void
   onSavePrompt: (clipIndex: number, update: Parameters<typeof updateClipPrompt>[2]) => Promise<void>
+  onSaveAnchors: (clipIndex: number, anchors: { start_from_previous: boolean; end_on_next: boolean }) => Promise<void>
   onTakeSelected: () => Promise<void>
 }) {
   const [expandImage, setExpandImage] = useState(false)
@@ -409,7 +421,14 @@ function ClipCard({ clip, pipeline, busy = false, onTag, onRerunImage, onRerunVi
   const [editImagePrompt, setEditImagePrompt] = useState(clip.image_prompt || '')
   const [editVideoPrompt, setEditVideoPrompt] = useState(clip.video_prompt || '')
   const [savingPrompt, setSavingPrompt] = useState(false)
+  const [savingAnchors, setSavingAnchors] = useState(false)
+  const [startFromPrevious, setStartFromPrevious] = useState(clip.start_from_previous === true)
+  const [endOnNext, setEndOnNext] = useState(clip.end_on_next === true)
   const [saveError, setSaveError] = useState('')
+  useEffect(() => {
+    setStartFromPrevious(clip.start_from_previous === true)
+    setEndOnNext(clip.end_on_next === true)
+  }, [clip.start_from_previous, clip.end_on_next])
   const [castDraft, setCastDraft] = useState<string[] | null>(null)
   const castOptions = pipeline.shot_cast_options || []
   const castSelection = castDraft ?? clip.shot_reference_cast ?? castOptions.map(option => option.id)
@@ -428,6 +447,20 @@ function ClipCard({ clip, pipeline, busy = false, onTag, onRerunImage, onRerunVi
   const draftFinalPipeline = pipeline as DraftFinalPipeline
   const requiresShotImage = !pipeline.shot_image_policy
     || pipeline.shot_image_policy === 'generate'
+  const saveAnchors = async () => {
+    setSavingAnchors(true)
+    setSaveError('')
+    try {
+      await onSaveAnchors(clip.index, {
+        start_from_previous: startFromPrevious,
+        end_on_next: endOnNext,
+      })
+    } catch (error) {
+      setSaveError(error instanceof Error ? error.message : 'Could not save shot boundaries')
+    } finally {
+      setSavingAnchors(false)
+    }
+  }
 
   // hasPolish is true if ANY of the four polish snapshots was captured.
   // Window-prompt polish only fires for ≥21s shots; keyframe polish
@@ -487,6 +520,35 @@ function ClipCard({ clip, pipeline, busy = false, onTag, onRerunImage, onRerunVi
           busy={busy}
           onTakeSelected={onTakeSelected}
         />
+        {boundaryAnchorsEnabled && pipeline.clips.length > 1 && (
+          <details className="rounded border border-border bg-bg-tertiary px-2 py-1.5 text-xs">
+            <summary className="cursor-pointer text-text-secondary">Shot boundaries</summary>
+            <div className="mt-2 space-y-2">
+              {clip.index > 0 && <label className="flex items-start gap-2 text-text-primary">
+                <input type="checkbox" className="mt-0.5" checked={startFromPrevious}
+                  disabled={busy || savingAnchors}
+                  onChange={event => setStartFromPrevious(event.target.checked)} />
+                <span>Start from Shot {clip.index}'s last frame</span>
+              </label>}
+              {clip.index + 1 < pipeline.clips.length && <label className="flex items-start gap-2 text-text-primary">
+                <input type="checkbox" className="mt-0.5" checked={endOnNext}
+                  disabled={busy || savingAnchors}
+                  onChange={event => setEndOnNext(event.target.checked)} />
+                <span>End on Shot {clip.index + 2}'s first frame</span>
+              </label>}
+              <p className="text-[10px] text-text-muted">
+                Anchors use the neighbor's current rendered take. Changing this shot's take marks anchored shots stale.
+              </p>
+              <button type="button" disabled={busy || savingAnchors
+                || (startFromPrevious === (clip.start_from_previous === true)
+                  && endOnNext === (clip.end_on_next === true))}
+                onClick={() => void saveAnchors()}
+                className="rounded border border-border px-2 py-1 text-[10px] text-text-secondary disabled:opacity-40">
+                {savingAnchors ? 'Saving…' : 'Save boundaries'}
+              </button>
+            </div>
+          </details>
+        )}
         {castOptions.length > 1 && (
           <details className="rounded border border-border bg-bg-tertiary px-2 py-1.5 text-xs">
             <summary className="cursor-pointer text-text-secondary">
@@ -649,11 +711,11 @@ function ClipCard({ clip, pipeline, busy = false, onTag, onRerunImage, onRerunVi
                   onRerunVideo(clip.index, editingVideo ? editVideoPrompt : undefined)
                 }
               }}
-                disabled={busy || (requiresShotImage && !clip.start_image_filename)}
+                disabled={busy || (requiresShotImage && !clip.start_image_filename && !clip.start_from_previous)}
                 className="flex items-center gap-1 rounded border border-border px-1.5 py-0.5 text-[10px] text-text-secondary hover:text-indicator-success disabled:cursor-not-allowed disabled:opacity-40"
                 title={busy
                   ? 'Wait for pipeline repair to finish'
-                  : requiresShotImage && !clip.start_image_filename
+                  : requiresShotImage && !clip.start_image_filename && !clip.start_from_previous
                     ? 'Generate the start image first'
                     : 'Render only this shot'}>
                 <Film size={10} />
@@ -812,6 +874,7 @@ function DirectorDashboardInner() {
   const [resuming, setResuming] = useState(false)
   const [modelOptions, setModelOptions] = useState<ModelOptions | null>(null)
   const [modelOptionsError, setModelOptionsError] = useState('')
+  const [showrunnerInfo, setShowrunnerInfo] = useState<DirectorShowrunnerInfo | null>(null)
   const [finalPreset, setFinalPreset] = useState('')
   const [finalizingPid, setFinalizingPid] = useState<string | null>(null)
   // Keyed by pipeline id — a bare boolean would let "arm on pipeline A,
@@ -823,6 +886,12 @@ function DirectorDashboardInner() {
   const [regenErrors, setRegenErrors] = useState<Record<string, string>>({})
   const autoLoadAttemptedPid = useRef<string | null>(null)
   const selectedPid = selectedPipeline?.pipeline_id || null
+  const showrunnerFeatures = showrunnerInfo?.pipeline_id === selectedPid
+    ? showrunnerInfo.features
+    : null
+  const joinedCuts = showrunnerInfo?.pipeline_id === selectedPid
+    ? showrunnerInfo.joined_cuts
+    : []
   const selectedDraftFinal = selectedPipeline as DraftFinalPipeline | null
   const draftSizeLabel = selectedPipeline?.director_resolution_preset
     || safeStr(selectedPipeline?.video_params?.resolution)
@@ -867,6 +936,23 @@ function DirectorDashboardInner() {
     })
     return () => { active = false }
   }, [selectedPipeline?.pipeline_id, selectedPipeline?.video_model])
+
+  useEffect(() => {
+    setShowrunnerInfo(null)
+    if (!selectedPid) return
+    let active = true
+    getDirectorShowrunnerInfo(selectedPid).then(info => {
+      if (active) setShowrunnerInfo(info)
+    }).catch(() => {
+      if (active) setShowrunnerInfo(null)
+    })
+    return () => { active = false }
+  }, [selectedPid])
+
+  const refreshShowrunnerInfo = async () => {
+    if (!selectedPid) return
+    setShowrunnerInfo(await getDirectorShowrunnerInfo(selectedPid))
+  }
 
   useEffect(() => {
     if (!selectedPid || !shouldPollFinal) return
@@ -1161,8 +1247,9 @@ function DirectorDashboardInner() {
                 setRegenError(null)
                 // Surface failures in the existing error slot — a bare
                 // rejected promise here looked like the button doing nothing.
-                rejoinClips(selectedPipeline.pipeline_id).catch(e =>
-                  setRegenError(e instanceof Error ? e.message : 'Rejoin failed'))
+                rejoinClips(selectedPipeline.pipeline_id)
+                  .then(refreshShowrunnerInfo)
+                  .catch(e => setRegenError(e instanceof Error ? e.message : 'Rejoin failed'))
               }}
               disabled={loading || repairBusy || totalClips < 2}
               className="flex items-center gap-1 px-2 py-1 text-[10px] bg-accent-blue/10 border border-accent-blue/30 rounded text-accent-blue hover:bg-accent-blue/20 disabled:opacity-40 transition-colors"
@@ -1258,6 +1345,16 @@ function DirectorDashboardInner() {
               <PipelineProgressBar pipeline={selectedPipeline} />
             </div>
 
+            <DirectorDeliveryPanel
+              pipelineId={selectedPipeline.pipeline_id}
+              status={selectedPipeline.status}
+              pipelineType={selectedPipeline.pipeline_type}
+              clips={selectedPipeline.clips}
+              features={showrunnerFeatures}
+              joinedCuts={joinedCuts}
+              onFeaturesChanged={refreshShowrunnerInfo}
+            />
+
             {/* LLM Log */}
             <div className="bg-bg-secondary rounded-lg border border-border p-3">
               <h3 className="text-[11px] text-text-secondary uppercase tracking-wider font-medium mb-2">LLM Planning Log</h3>
@@ -1278,17 +1375,30 @@ function DirectorDashboardInner() {
                     clip={clip}
                     pipeline={selectedPipeline}
                     busy={repairBusy}
+                    boundaryAnchorsEnabled={showrunnerFeatures?.boundary_anchors === true}
                     onTag={(tag) => tagClip(selectedPipeline.pipeline_id, clip.index, tag)}
                     onSavePrompt={async (idx, update) => {
                       setRegenError(null)
                       await updateClipPrompt(selectedPipeline.pipeline_id, idx, update)
                       await loadPipeline(selectedPipeline.pipeline_id)
+                      await refreshShowrunnerInfo()
+                    }}
+                    onSaveAnchors={async (idx, anchors) => {
+                      await updateDirectorBoundaryAnchors(selectedPipeline.pipeline_id, idx, anchors)
+                      await loadPipeline(selectedPipeline.pipeline_id)
+                      await refreshShowrunnerInfo()
                     }}
                     onRerunImage={(idx, prompt) => { setRegenError(null); rerunClipImage(selectedPipeline.pipeline_id, idx, prompt).catch(e => setRegenError(String(e instanceof Error ? e.message : e))) }}
-                    onRerunVideo={(idx, prompt) => { setRegenError(null); rerunClipVideo(selectedPipeline.pipeline_id, idx, prompt).catch(e => setRegenError(String(e instanceof Error ? e.message : e))) }}
+                    onRerunVideo={(idx, prompt) => {
+                      setRegenError(null)
+                      rerunClipVideo(selectedPipeline.pipeline_id, idx, prompt)
+                        .then(refreshShowrunnerInfo)
+                        .catch(e => setRegenError(String(e instanceof Error ? e.message : e)))
+                    }}
                     onTakeSelected={async () => {
                       await loadPipeline(selectedPipeline.pipeline_id)
                       await loadPipelineList()
+                      await refreshShowrunnerInfo()
                     }}
                   />
                 ))}

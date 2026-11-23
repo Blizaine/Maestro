@@ -40,6 +40,31 @@ PROJECTORS = {
 
 
 class TestWriterMMProjRegistry(unittest.TestCase):
+    def test_inkling_projector_uses_the_same_pinned_revision_as_its_model(self):
+        repo_id = "ghost-actual/Inkling-2-Mini-Uncensored-GGUF"
+        entry = llm_service.MODEL_REGISTRY[repo_id]
+        with tempfile.TemporaryDirectory() as cache_dir:
+            projector = os.path.join(cache_dir, entry["mmproj_file"])
+            with mock.patch.object(llm_service, "_download_gguf", return_value=projector) as download:
+                self.assertEqual(llm_service._resolve_mmproj(repo_id, entry, cache_dir), (projector, repo_id))
+            download.assert_called_once_with(
+                repo_id, entry["mmproj_file"], cache_dir, revision=entry["hf_revision"]
+            )
+        self.assertEqual(entry["llama_min_tag"], "b12651")
+        self.assertIn(repo_id, {model["id"] for model in llm_service.get_available_models()})
+
+    def test_inkling_reserves_room_for_a_short_answer_at_zero_effort(self):
+        repo_id = "ghost-actual/Inkling-2-Mini-Uncensored-GGUF"
+        payload = {"max_tokens": 80}
+        with mock.patch.multiple(llm_service, _provider="local", _model_id=repo_id):
+            effort = llm_service._apply_reasoning_controls(
+                payload, enable_thinking=False, thinking_budget=0
+            )
+        self.assertEqual(effort, "none")
+        self.assertEqual(payload["chat_template_kwargs"]["reasoning_effort"], "none")
+        self.assertEqual(payload["max_tokens"], 272)
+        self.assertNotIn("thinking_budget_tokens", payload)
+
     def test_registered_projectors_use_verified_model_specific_repositories(self):
         for repo_id, (projector_repo, filename, alias, size_gb) in PROJECTORS.items():
             with self.subTest(repo_id=repo_id):

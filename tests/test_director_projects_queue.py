@@ -491,6 +491,54 @@ class TestDirectorProjectRevisionsAndQueue(unittest.TestCase):
             ["completed", "completed"],
         )
 
+    def test_queue_holds_followups_after_failure_or_stop(self):
+        for terminal_status in ("failed", "cancelled"):
+            with self.subTest(status=terminal_status):
+                pipeline._director_queue_state = None
+                pipeline._director_queue_base = None
+                pipeline._director_queue_worker = None
+                queue_path = os.path.join(
+                    self.temp_dir.name, "_director_queue.json",
+                )
+                if os.path.isfile(queue_path):
+                    os.remove(queue_path)
+                pipeline.enqueue_director_pipeline(self.temp_dir.name, {
+                    "scene_description": "First project",
+                })
+                pipeline.enqueue_director_pipeline(self.temp_dir.name, {
+                    "scene_description": "Follow-up project",
+                })
+                with pipeline._director_queue_lock:
+                    state = pipeline._load_director_queue_locked(self.temp_dir.name)
+                    state["paused"] = False
+                    for entry in state["entries"]:
+                        entry["status"] = "queued"
+
+                started = []
+
+                def fake_start(params):
+                    started.append(params["scene_description"])
+                    return "render-1"
+
+                with (
+                    patch.object(pipeline, "start_pipeline", side_effect=fake_start),
+                    patch.object(
+                        pipeline,
+                        "get_pipeline",
+                        return_value={"status": terminal_status, "error": "test"},
+                    ),
+                ):
+                    pipeline._run_director_queue(self.temp_dir.name)
+
+                queue = pipeline.list_director_queue(self.temp_dir.name)
+                self.assertEqual(started, ["First project"])
+                self.assertTrue(queue["paused"])
+                self.assertEqual(
+                    [entry["status"] for entry in queue["entries"]],
+                    [terminal_status, "held"],
+                )
+                self.assertIn("previous project", queue["entries"][1]["message"])
+
     def test_queue_waits_behind_direct_pipeline_before_dispatch(self):
         queued = pipeline.enqueue_director_pipeline(self.temp_dir.name, {
             "scene_description": "Next revision",

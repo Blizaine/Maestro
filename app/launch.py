@@ -7362,6 +7362,7 @@ def get_system_config():
     cfg = wgp.server_config
     from services.memory_settings import memory_settings_snapshot
     from services.memory_runtime import active_runtime_selection, runtime_snapshot
+    from shared import attention_kit
     from shared.cuda_memory import allocator_status
     runtime_selection = active_runtime_selection(
         _app_dir, getattr(wgp, "memory_runtime_selection", None)
@@ -7372,6 +7373,8 @@ def get_system_config():
         **runtime_snapshot(runtime_selection, cfg),
         "app_version": _APP_VERSION,
         "attention_mode": cfg.get("attention_mode", "auto"),
+        attention_kit.CHUNKER_CONFIG_KEY: attention_kit.current_chunker(),
+        "sagegp_first_step_precise": cfg.get("sagegp_first_step_precise", True),
         "transformer_quantization": cfg.get("transformer_quantization", "int8"),
         "vae_config": cfg.get("vae_config", 0),
         "compile": cfg.get("compile", ""),
@@ -7496,6 +7499,16 @@ async def update_system_config(request: Request):
 
     if "attention_mode" in body and body["attention_mode"] not in wgp.attention_modes_supported:
         raise HTTPException(status_code=400, detail="Invalid attention mode")
+    if "sagegp_first_step_precise" in body and not isinstance(body["sagegp_first_step_precise"], bool):
+        raise HTTPException(status_code=400, detail="SageGP first-step precision must be a boolean")
+    from shared import attention_kit
+    from shared.attention_chunking import normalize_mode as normalize_chunker_mode
+    chunker_key = attention_kit.CHUNKER_CONFIG_KEY
+    if chunker_key in body:
+        try:
+            body[chunker_key] = normalize_chunker_mode(body[chunker_key])
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
     if "transformer_quantization" in body and body["transformer_quantization"] not in ("int8", "fp8", "bf16"):
         raise HTTPException(status_code=400, detail="Invalid transformer quantization")
     if "vae_config" in body and (
@@ -7527,7 +7540,7 @@ async def update_system_config(request: Request):
             raise HTTPException(status_code=400, detail="VRAM safety coefficient must be from 0.50 to 0.95")
 
     ALLOWED_KEYS = {
-        "attention_mode", "transformer_quantization", "vae_config",
+        "attention_mode", chunker_key, "sagegp_first_step_precise", "transformer_quantization", "vae_config",
         "compile", "video_profile", "image_profile", "audio_profile",
         "video_output_codec", "image_output_codec",
         "enhancer_enabled", "prompt_enhancer_quantization",
@@ -7606,6 +7619,8 @@ async def update_system_config(request: Request):
     # Apply runtime side effects where possible
     if "attention_mode" in updated:
         wgp.attention_mode = updated["attention_mode"]
+    if chunker_key in updated:
+        attention_kit.configure_chunker(updated[chunker_key])
     if "vae_config" in updated:
         wgp.vae_config = updated["vae_config"]
     if "compile" in updated:
@@ -27243,6 +27258,16 @@ async def media_flow_capabilities(refresh: bool = False):
 @api.post("/api/v1/media-flow")
 async def media_flow_submit(request: Request):
     return _enqueue_media_flow(await request.json())
+
+
+from services.director_showrunner import create_director_showrunner_router
+
+api.include_router(create_director_showrunner_router(
+    authorize_pipeline=_agent_require_director_pipeline,
+    initialize_pipeline=_init_pipeline,
+    get_output_dir=lambda: wgp.server_config.get("save_path", "outputs"),
+    enqueue_media_flow=_enqueue_media_flow,
+))
 
 
 @api.post("/api/v1/media-flow/outpaint")

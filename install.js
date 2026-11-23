@@ -75,7 +75,7 @@ module.exports = async (kernel) => {
         venv: runtime.env,
         venv_python: runtime.python,
         path: "app",
-        message: ["python scripts/install_gguf_kernels.py", "python scripts/install_wgp_kernels.py"]
+        message: ["python scripts/install_gguf_kernels.py", "python scripts/install_wgp_kernels.py", "python scripts/install_sagegp.py"]
       }
     },
     // Fetch the seed-vc voice-conversion component (GPL-3.0). It lives in

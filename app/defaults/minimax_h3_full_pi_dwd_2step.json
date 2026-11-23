@@ -1,0 +1,31 @@
+{
+  "model": {
+    "name": "MiniMax H3 pi-H3 DWD 2-Step — Full",
+    "architecture": "minimax_h3_full",
+    "experimental": true,
+    "description": "Fast two-step H3 Frames generation on the Full checkpoint. This dedicated pi-H3 DWD model predicts its final frames directly from the trained pixel head, keeps H3 audio generation, and uses a fixed one-phase Euler schedule. Experimental texture detail may be softer than a regular VAE decode.",
+    "minimax_h3_qkv_layout": "interleaved",
+    "URLs": [
+      "https://huggingface.co/DeepBeepMeep/MiniMax-H3/resolve/fec7846aef352e58a1cfb699455e3d104281e68b/MiniMax-H3-FL2VA_bf16.safetensors",
+      "https://huggingface.co/DeepBeepMeep/MiniMax-H3/resolve/fec7846aef352e58a1cfb699455e3d104281e68b/MiniMax-H3-FL2VA_int8_convrot.safetensors"
+    ],
+    "modules": [
+      [
+        "https://huggingface.co/DeepBeepMeep/MiniMax-H3/resolve/da05e475e3266b30efbdc98befdf7888a069bbcc/minimax_h3_fl2va_pi_2step_dwd_int8_convrot.safetensors"
+      ]
+    ],
+    "loras": [
+      "https://huggingface.co/DeepBeepMeep/MiniMax-H3/resolve/da05e475e3266b30efbdc98befdf7888a069bbcc/loras/minimax_h3_fl2va_pi_2step_dwd_lora_bf16.safetensors"
+    ],
+    "loras_multipliers": [
+      "1"
+    ],
+    "dwd": 2
+  },
+  "num_inference_steps": 2,
+  "guidance_phases": 1,
+  "guidance_scale": 1,
+  "sample_solver": "euler",
+  "flow_shift": 12,
+  "prompt": "A five-second single take of a small glass greenhouse in the rain at dusk. A botanist gently places a glowing seed into dark soil as tiny green shoots unfurl. Water beads and runs down the glass; warm amber lamps glow inside. Soft rain, gentle leaves, and a quiet chime are audible."
+}

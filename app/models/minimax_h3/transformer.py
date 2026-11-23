@@ -228,6 +228,7 @@ def get_linear_split_map(
 class MiniMaxH3TransformerOutput:
     sample: torch.Tensor
     audio_sample: torch.Tensor | None
+    dwd_video: torch.Tensor | None = None
 
 
 def _weight_dtype(module: nn.Module, fallback: torch.dtype) -> torch.dtype:
@@ -865,6 +866,15 @@ class MiniMaxH3Attention(nn.Module):
             if can_project_rows:
                 from shared import attention_kit
 
+                chunker_mode = attention_kit.current_chunker()
+                chunker_active = length * batch >= attention_kit.MIN_SPLIT_TOKENS and (
+                    chunker_mode in ("on", "extreme")
+                    or attention_kit.chunking_needed(
+                        hidden_states.device,
+                        4 * length * batch * self.heads * self.head_dim * hidden_states.element_size(),
+                        ("h3_attention", batch, length, self.heads, self.head_dim),
+                    )
+                )
                 split_requested = attention_kit.head_groups(
                     self.heads,
                     length * batch,
@@ -883,7 +893,10 @@ class MiniMaxH3Attention(nn.Module):
                         )
                     return _rms_norm_inplace(norm, rows)
 
-                def norm_rope(query, key, _group):
+                def norm_rope(query, key, group):
+                    rotary_rows = rotary
+                    if rotary_rows is not None and group.rows is not None:
+                        rotary_rows = tuple(table[group.rows] for table in rotary_rows)
                     if (
                         fused_rms_rope
                         and query is not None
@@ -906,11 +919,11 @@ class MiniMaxH3Attention(nn.Module):
                         norm_rows(self.q_norm, query)
                     if key is not None:
                         norm_rows(self.k_norm, key)
-                    if rotary is not None:
+                    if rotary_rows is not None:
                         if query is not None:
-                            _apply_rope_inplace(query, *rotary)
+                            _apply_rope_inplace(query, *rotary_rows)
                         if key is not None:
-                            _apply_rope_inplace(key, *rotary)
+                            _apply_rope_inplace(key, *rotary_rows)
 
                 if use_veda:
                     owned_input = [hidden_states]
@@ -949,9 +962,14 @@ class MiniMaxH3Attention(nn.Module):
                         and attention_kit.sage2_staged_settings(hidden_states.device)
                         is not None
                     )
-                    if not fused_rms_rope or split_requested or staged_sage2:
+                    if not fused_rms_rope or split_requested or staged_sage2 or chunker_active:
                         owned_input = [hidden_states]
                         hidden_states = None
+                        chunker_options = (
+                            {"out_proj": self.out_proj, "norm_rope_rows": True}
+                            if chunker_active and chunker_mode != "on"
+                            else {}
+                        )
                         attended = attention_kit.qkv_attention(
                             owned_input,
                             self.q_proj,
@@ -960,7 +978,10 @@ class MiniMaxH3Attention(nn.Module):
                             self.heads,
                             self.head_dim,
                             norm_rope,
+                            **chunker_options,
                         )
+                        if chunker_options:
+                            return attended
                         if split_requested:
                             return _project_attention_output_reusing_storage(
                                 self.out_proj, attended, batch, length
@@ -1493,6 +1514,7 @@ class MiniMaxH3Transformer(nn.Module):
         dtype: torch.dtype = torch.bfloat16,
         sla_config=None,
         vdn: bool = False,
+        dwd_head: bool = False,
         dropped_blocks=(),
         endpoint_gate: float | None = None,
     ):
@@ -1591,6 +1613,11 @@ class MiniMaxH3Transformer(nn.Module):
             compressed_modulation=self.use_adaln_curves,
             video_pdd_steps=video_pdd_steps,
         )
+        self.dwd_head = None
+        if dwd_head:
+            from .dwd import MiniMaxH3DWDHead
+
+            self.dwd_head = MiniMaxH3DWDHead(hidden=hidden_size, dtype=dtype)
         self._interrupt = False
 
     def set_qkv_layout(self, layout: str) -> None:
@@ -1620,13 +1647,15 @@ class MiniMaxH3Transformer(nn.Module):
         affine fit.
         """
 
-        from .lora_affine import convert_adaln_loras
+        from .lora_affine import convert_adaln_loras, pop_source_package
         from .lora_names import normalize_flattened_lora_names
         from .pdd import is_pdd_state_dict, preprocess_pdd_lora_state_dict
         from .lora_vdn import (
             interleave_qkv_lora_b_rows,
             normalize_diffusers_lora,
         )
+        state_dict = dict(state_dict)
+        source_package = pop_source_package(state_dict)
         if any(key.startswith("hyperflow_adaln.") for key in state_dict):
             state_dict = {key: value for key, value in state_dict.items() if not key.startswith("hyperflow_adaln.")}
 
@@ -1689,6 +1718,7 @@ class MiniMaxH3Transformer(nn.Module):
             getattr(self, "h3_lora_model_type", model_type),
             converted,
             self.adaln_t_table if self.use_adaln_curves else None,
+            source_package=source_package,
         )
         if count:
             source = (
@@ -1965,6 +1995,43 @@ class MiniMaxH3Transformer(nn.Module):
                     packed[:, target_start:]
                 )
 
+        dwd_video = None
+        dwd_convert = _kwargs.get("dwd_convert")
+        if dwd_convert is not None:
+            if self.dwd_head is None:
+                raise ValueError("A DWD pixel conversion callback requires the dedicated pi-H3 DWD model.")
+            latent_shape = _kwargs.get("latent_shape")
+            if not isinstance(latent_shape, (tuple, list)) or len(latent_shape) != 3:
+                raise ValueError("MiniMax H3 DWD requires its latent video geometry.")
+            target_indices = video_indices[condition_video_rows:]
+            target_hidden = packed[0].index_select(0, target_indices)
+            target_timestep_indices = timestep_indices.index_select(0, target_indices)
+            if target_inverse is not None:
+                target_hidden = target_hidden.index_select(0, target_inverse)
+                target_timestep_indices = target_timestep_indices.index_select(0, target_inverse)
+            target_latent_t, target_latent_h, target_latent_w = (
+                int(value) for value in latent_shape
+            )
+            patch_t, patch_h, patch_w = (int(value) for value in self.config.patch_size)
+            if target_latent_t * (target_latent_h // patch_h) * (target_latent_w // patch_w) != target_hidden.shape[0]:
+                raise ValueError("MiniMax H3 DWD target rows do not match the generated latent grid.")
+            dwd_features = self.dwd_head.features(
+                target_hidden,
+                timestep,
+                target_timestep_indices,
+                packed.dtype,
+            )
+            del target_hidden, target_timestep_indices
+            dwd_video = self.dwd_head.decode(
+                [dwd_features],
+                (
+                    target_latent_t,
+                    target_latent_h // patch_h,
+                    target_latent_w // patch_w,
+                ),
+                dwd_convert,
+                lambda: self._interrupt,
+            )
         final_offset = _kwargs.get("hyperflow_final_offset")
         packed = self.final_layer(packed, curve, timestep_runs, adaln_offset=final_offset)
         video_output = _project_selected_rows(
@@ -1982,4 +2049,4 @@ class MiniMaxH3Transformer(nn.Module):
         )
         if not return_dict:
             return video_output, audio_output
-        return MiniMaxH3TransformerOutput(video_output, audio_output)
+        return MiniMaxH3TransformerOutput(video_output, audio_output, dwd_video)

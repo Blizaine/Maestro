@@ -50,6 +50,11 @@ def minimax_h3_lora_incompatibility(
     """Return a known H3 model/adapter incompatibility, if one is proven."""
 
     definition = model_def or {}
+    from .pi_h3 import pi_h3_lora_incompatibility
+
+    pi_reason = pi_h3_lora_incompatibility(definition, path)
+    if pi_reason is not None:
+        return pi_reason
     import_profile = definition.get("minimax_h3_import_profile") or {}
     if (
         definition.get("minimax_h3_fused_turbo")
@@ -173,12 +178,16 @@ def fasth3_lora_incompatibility(
     keys = tuple(str(key).lower() for key in header if key != "__metadata__")
 
     from .turbo import is_minimax_h3_pdd_lora, is_minimax_h3_turbo_lora
+    from .pi_h3 import is_pi_h3_accelerator
 
     if "pdd" in tokens or is_minimax_h3_pdd_lora(raw_path) or _has_pdd_head_bank(header):
         return "H3 PDD adapters use a different trained schedule and output-head bank"
 
     if is_minimax_h3_vdn_lora(raw_path):
         return "VDN adapters require their matched VDN recipe and are unavailable on FastH3"
+
+    if is_pi_h3_accelerator(raw_path):
+        return "pi-H3 adapters require their trained two- or four-step FL2VA schedule and are unavailable on FastH3"
 
     if "dora" in tokens or any(marker in key for key in keys for marker in _FASTH3_DORA_MARKERS):
         return "DoRA adapters are unsupported by the FastH3 LoRA path; use an ordinary H3 LoRA"

@@ -2830,8 +2830,14 @@ from services.generation_preview import DEFAULT_PREVIEW_MODE
 server_config.setdefault("generation_preview", DEFAULT_PREVIEW_MODE)
 from services.memory_settings import apply_memory_defaults
 apply_memory_defaults(server_config)
-from shared import attention_kit
+from shared import attention_kit, sagegp_runtime
 attention_kit.configure(server_config["attention_head_split"])
+try:
+    attention_kit.configure_chunker(
+        server_config.get(attention_kit.CHUNKER_CONFIG_KEY, attention_kit.CHUNKER_DEFAULT)
+    )
+except ValueError:
+    attention_kit.configure_chunker(attention_kit.CHUNKER_DEFAULT)
 if args.prevent_power_throttling:
     prevent_power_throttling()
 
@@ -5238,6 +5244,7 @@ def build_callback(state, pipe, send_cmd, status, num_inference_steps, preview_m
             phase, state_step_idx = gen["progress_phase"]
             step_idx = state_step_idx if step_idx < 0 else step_idx + 1
         else:
+            sagegp_runtime.set_step(step_idx + 1)
             step_idx += 1         
             if gen.get("abort", False):
                 # Model wrappers may clear their flag at generate() entry;
@@ -8159,6 +8166,8 @@ def _resolve_image_ref_fit(model_def, auto_aspect):
     return ref_fit
 
 @cleanup_failed_generation(lambda: release_generation_memory())
+@sagegp_runtime.sampling_scope()
+@attention_kit.chunker_scope()
 def generate_video(
     task,
     send_cmd,
@@ -8404,6 +8413,9 @@ def generate_video(
     gen = get_gen_info(state)
     if gen.get("abort", False):
         return False
+    sagegp_runtime.configure_sampling(
+        server_config.get("sagegp_first_step_precise", sagegp_runtime.FIRST_STEP_PRECISE_DEFAULT)
+    )
     # Head splitting is a generation-boundary setting. Editing settings while
     # a job runs must not change the attention grouping inside that job.
     from services.memory_settings import per_job_attention_head_split
@@ -8733,6 +8745,10 @@ def generate_video(
         # recipe unusable on otherwise supported CUDA installations.
         print("[Pika H3 Flex] Sage2 is unavailable in this runtime; using dense SDPA.")
         attn = "sdpa"
+    elif attn in sagegp_runtime.MODES and attn not in override_attention_modes_supported:
+        fallback = get_default_attention_mode()
+        send_cmd("info", f"SageGP mode '{attn}' is unavailable on this GPU. Using {fallback} attention.")
+        attn = fallback
     elif attn not in override_attention_modes_supported:
         send_cmd("info", f"You have selected attention mode '{attn}'. However it is not installed or supported on your system. You should either install it or switch to the default 'sdpa' attention.")
         send_cmd("exit")

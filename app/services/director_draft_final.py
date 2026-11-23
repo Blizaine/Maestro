@@ -526,20 +526,29 @@ def select_pipeline_clip_take(
                 f"The selected {take.get('label', 'take')} media changed after "
                 "inspection. Inspect the current file before selecting it."
             )
+        previous_source = pipeline._director_anchor_source_snapshot(
+            clip, clip_index,
+        )
         clip["video_filename"] = take["filename"]
         clip["selected_take_id"] = take_id
         clip["video_stale"] = False
-        updated = pipeline._update_saved_pipeline(
-            out_dir,
-            pipeline_id,
-            lambda saved: saved.get("clips", [])[clip_index].update({
+        def update_selected_take(saved):
+            saved_clip = saved.get("clips", [])[clip_index]
+            saved_clip.update({
                 "video_filename": take["filename"],
                 "selected_take_id": take_id,
                 "video_stale": False,
-            }),
+            })
+            pipeline._mark_director_anchor_dependents_stale(
+                saved, clip_index, previous_source, take["filename"],
+            )
+
+        updated = pipeline._update_saved_pipeline(
+            out_dir, pipeline_id, update_selected_take,
         )
         if not updated:
             raise DirectorDraftFinalError("The selected take could not be saved to the pipeline.")
+        pipeline._sync_live_pipeline_clip_state(pipeline_id, updated)
         with pipeline._pipeline_lock:
             live = pipeline._pipelines.get(pipeline_id)
             if live is not None:
@@ -758,6 +767,8 @@ def _make_final_child(
             for clip in child_state["clips"]
             for filename in [
                 clip.get("start_image_filename"),
+                clip.get("start_anchor_filename"),
+                clip.get("end_anchor_filename"),
                 *(clip.get("keyframe_filenames") or []),
                 clip.get("video_filename"),
             ]

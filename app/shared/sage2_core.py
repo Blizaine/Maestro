@@ -97,8 +97,8 @@ def is_sage2_supported():
             return False
     return True
 
-from importlib.metadata import version
-sg2_version = version("sageattention")
+from shared.sagegp_runtime import sageattention_version
+sg2_version = sageattention_version()
 sg2pp = sg2_version.startswith("2.2")
 
 import subprocess

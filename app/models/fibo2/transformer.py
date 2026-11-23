@@ -172,11 +172,14 @@ class BriaFibo2Attention(nn.Module):
                     if key is not None:
                         key.copy_(self.norm_k(key))
                 else:
-                    ops.interleaved_norm_rope_(query, key, table, self.norm_q, self.norm_k)
+                    local_table = table if group.rows is None else table[:, group.rows]
+                    ops.interleaved_norm_rope_(query, key, local_table, self.norm_q, self.norm_k)
 
             result = attention_kit.qkv_attention(
                 [hidden_states], self.to_q, self.to_k, self.to_v, self.heads,
                 self.head_dim, norm_rope,
+                out_proj=self.to_out[0],
+                norm_rope_rows=True,
             )
         else:
             batch, query_length, _ = hidden_states.shape
@@ -191,7 +194,7 @@ class BriaFibo2Attention(nn.Module):
                 ops.interleaved_norm_rope_(query, key, table, self.norm_q, self.norm_k)
             result = attend_projected(query, key, value, attention_mask=attention_mask,
                                       causal=False, force_attention="sdpa")
-        return self.to_out[0](result.flatten(2))
+        return result if encoder_hidden_states is None and attention_mask is None else self.to_out[0](result.flatten(2))
 
 class BriaFibo2TransformerBlock(nn.Module):
     """Z-Image's block. With `cross_attention_dim` it becomes an injection block that also reads the text encoder."""

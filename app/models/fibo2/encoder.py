@@ -64,9 +64,12 @@ class FiboVisionAttention(nn.Module):
         cursor = 0
         for length in lengths:
             def norm_rope(q, k, group):
+                group_start = 0 if group.rows is None or group.rows.start is None else group.rows.start
                 for tensor in (q, k):
                     if tensor is not None:
                         def rows(part, first, last):
+                            first += group_start
+                            last += group_start
                             value = part.float()
                             return ops.paired_rope_(
                                 value, cosine[None, cursor + first:cursor + last, None].float(),
@@ -76,6 +79,8 @@ class FiboVisionAttention(nn.Module):
             value = attention_kit.qkv_attention(
                 [hidden_states[cursor:cursor + length]], self.q_proj, self.k_proj, self.v_proj,
                 self.num_heads, self.head_dim, norm_rope,
+                out_proj=self.proj,
+                norm_rope_rows=True,
             )
             output[cursor:cursor + length].copy_(value.reshape(length, -1))
             cursor += length

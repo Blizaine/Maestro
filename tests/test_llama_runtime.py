@@ -36,6 +36,13 @@ class TestLlamaBuildMetadata(unittest.TestCase):
             10488,
         )
 
+    def test_semver_runtime_reports_its_build_separately(self):
+        self.assertEqual(
+            llm_service._positive_llama_build("version: 1.0.0-dev (build 12651, commit f5e6915c2)"),
+            12651,
+        )
+        self.assertIsNone(llm_service._positive_llama_build("version: 1.0.0"))
+
     def test_zero_build_means_unknown(self):
         self.assertIsNone(
             llm_service._positive_llama_build("version: 0 (unknown)")
@@ -87,6 +94,11 @@ class TestLlamaBuildMetadata(unittest.TestCase):
                     ("llama-", "bin-win-cuda-12.4-x64.zip"),
                     ("cudart-", "bin-win-cuda-12.4-x64.zip"),
                 ],
+            )
+        )
+        self.assertFalse(
+            llm_service._llama_release_has_assets(
+                release, [("llama-", "bin-win-cuda-12.4-x64.zip")], minimum_build=12651
             )
         )
         self.assertFalse(

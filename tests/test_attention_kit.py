@@ -450,7 +450,9 @@ class TestAttentionKit(unittest.TestCase):
                     ]
                     for head_range in group_ranges:
                         norm_rope(
-                            query[:, :, head_range], key[:, :, head_range], head_range
+                            query[:, :, head_range],
+                            key[:, :, head_range],
+                            _ATTENTION_KIT.HeadGroup(head_range, head_range, None),
                         )
                     return F.scaled_dot_product_attention(
                         query.transpose(1, 2),

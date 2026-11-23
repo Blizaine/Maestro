@@ -277,7 +277,10 @@ class WanSelfAttention(nn.Module):
                         heads.start * self.head_dim:heads.stop * self.head_dim
                     ]
                 )
-            apply_rotary_emb_single([tensor], freqs, head_first=False)
+            local_freqs = freqs
+            if group.rows is not None:
+                local_freqs = tuple(value[group.rows] for value in freqs)
+            apply_rotary_emb_single([tensor], local_freqs, head_first=False)
 
 
     def text_cross_attention(self, xlist, context, return_q = False):
@@ -371,8 +374,10 @@ class WanSelfAttention(nn.Module):
                     query, key, group, freqs
                 ),
                 norm_spans_heads=isinstance(self.norm_q, WanRMSNorm),
+                out_proj=self.o,
+                norm_rope_rows=True,
             )
-            return self.o(attended.flatten(2)), None
+            return attended, None
 
         x = xlist[0]
         xlist.clear()

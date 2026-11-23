@@ -1122,9 +1122,17 @@ export function SystemSettingsPanel() {
     return <div className="text-xs text-text-muted py-4 text-center">Failed to load system settings</div>
   }
 
-  const attentionOptions = (systemConfig.attention_modes_available || ['auto', 'sdpa']).map(m => ({
+  const attentionLabels: Record<string, string> = {
+    auto: 'Auto',
+    sdpa: 'SDPA',
+    sagegp_precise: 'SageGP Precise (Sage2)',
+    sagegp_fast: 'SageGP Fast (Sage3)',
+    sagegp_adaptive: 'SageGP Adaptive',
+  }
+  const supportedAttention = systemConfig.attention_modes_available || ['auto', 'sdpa']
+  const attentionOptions = supportedAttention.map(m => ({
     value: m,
-    label: m === 'auto' ? 'Auto' : m === 'sdpa' ? 'SDPA' : m.charAt(0).toUpperCase() + m.slice(1),
+    label: attentionLabels[m] || m.charAt(0).toUpperCase() + m.slice(1),
   }))
 
   const profile0Allowed = systemConfig.saved_runtime === 'wangp9905'
@@ -1173,6 +1181,32 @@ export function SystemSettingsPanel() {
           options={attentionOptions}
           onChange={val => updateConfigWithAutoFlip({ attention_mode: val })}
         />
+        {supportedAttention.some(mode => mode === 'sagegp_fast' || mode === 'sagegp_adaptive') && (
+          <label className="flex items-center gap-2 text-xs text-text-secondary">
+            <input
+              type="checkbox"
+              checked={systemConfig.sagegp_first_step_precise ?? true}
+              onChange={event => updateConfigWithAutoFlip({ sagegp_first_step_precise: event.currentTarget.checked })}
+            />
+            Run the first denoising step in SageGP Precise
+          </label>
+        )}
+        <div>
+          <SelectField
+            label="Smart Inputs Chunker"
+            value={systemConfig.inputs_chunker ?? 'auto'}
+            options={[
+              { value: 'off', label: 'Off' },
+              { value: 'auto', label: 'Auto (when VRAM is tight)' },
+              { value: 'on', label: 'Standard' },
+              { value: 'extreme', label: 'Extreme (lowest peak VRAM)' },
+            ]}
+            onChange={value => updateConfig({ inputs_chunker: value as typeof systemConfig.inputs_chunker })}
+          />
+          <p className="mt-1.5 text-[11px] text-text-muted">
+            Splits large attention inputs in supported models. Extreme uses smaller batches of tokens and can take longer.
+          </p>
+        </div>
 
         <div>
           <SelectField

@@ -289,6 +289,16 @@ def _build_size_hint(info: dict) -> str:
 # size_hint is built automatically from weights_gb + mmproj_gb + KV-cache
 # estimate at module load (see post-loop below).
 MODEL_REGISTRY = {
+    "ghost-actual/Inkling-2-Mini-Uncensored-GGUF": {
+        "label": "Inkling 2 Mini Uncensored (Experimental)",
+        "gguf_file": "Inkling-2-Mini-Uncensored-Q4_K_M.gguf",
+        "mmproj_file": "mmproj-Inkling-2-Mini-Uncensored-BF16.gguf",
+        "hf_revision": "0bda4a29da46d88be396aa0d1948c0626a9ec313",
+        "weights_gb": 16.28, "mmproj_gb": 0.60, "arch": "inkling2-loop",
+        "llama_min_tag": "b12651",
+        "thinking_style": "inkling",
+        "extra_flags": ["-c", "32768", "-np", "1", "-ub", "16", "--no-op-offload"],
+    },
     "unsloth/Qwen3.5-2B-GGUF": {
         "label": "Qwen3.5 2B (Fast)",
         "gguf_file": "Qwen3.5-2B-Q4_K_S.gguf",
@@ -652,6 +662,7 @@ _PUBLIC_MODEL_ORDER = [
     "Abhiray/gemma-4-E4B-it-heretic-GGUF",                         # default (Recommended)
     "Jiunsong/supergemma4-26b-uncensored-gguf-v2",
     "paperscarecrow/Gemma-4-31B-it-abliterated-gguf",
+    "ghost-actual/Inkling-2-Mini-Uncensored-GGUF",
 ]
 
 
@@ -1118,8 +1129,8 @@ def _apply_reasoning_controls(
     per-request ceiling; Maestro's existing ``max_tokens`` allowance remains
     large enough to hold both the reasoning and the requested answer.
 
-    Structured-output callers force ``enable_thinking=False`` before reaching
-    this helper, so they never receive a reasoning tier or thinking budget.
+    Structured-output callers pass ``enable_thinking=False``. Inkling's
+    template receives its zero-effort tier, while Qwen gets no tier or budget.
     """
 
     template_kwargs = dict(payload.get("chat_template_kwargs") or {})
@@ -1129,6 +1140,16 @@ def _apply_reasoning_controls(
 
     entry = _active_registry_entry()
     resolved_effort: Optional[str] = None
+    if _provider == "local" and entry.get("thinking_style") == "inkling":
+        resolved_effort = (reasoning_effort or "medium") if enable_thinking else "none"
+        payload["reasoning_effort"] = resolved_effort
+        template_kwargs["reasoning_effort"] = resolved_effort
+        if enable_thinking and thinking_budget > 0:
+            payload["thinking_budget_tokens"] = int(thinking_budget)
+        elif "max_tokens" in payload:
+            # Inkling may still reason at effort zero. Reserving space lets
+            # short structured answers finish without forcing empty thoughts.
+            payload["max_tokens"] += 192
     if enable_thinking is True and entry.get("thinking_style", "qwen") == "qwen":
         resolved_effort = str(
             reasoning_effort or entry.get("default_reasoning_effort") or ""
@@ -1275,7 +1296,7 @@ def get_status() -> dict:
     }
 
 
-def _download_gguf(repo_id: str, filename: str, cache_dir: str) -> str:
+def _download_gguf(repo_id: str, filename: str, cache_dir: str, *, revision=None) -> str:
     """Download a GGUF file from HuggingFace and return the local path."""
     local_path = os.path.join(cache_dir, filename)
     if os.path.isfile(local_path):
@@ -1288,6 +1309,7 @@ def _download_gguf(repo_id: str, filename: str, cache_dir: str) -> str:
         repo_id=repo_id,
         filename=filename,
         local_dir=cache_dir,
+        revision=revision,
     )
     print(f"[LLM] Downloaded to: {downloaded}")
     return downloaded
@@ -1303,7 +1325,9 @@ def _resolve_mmproj(repo_id: str, registry_entry: dict, cache_dir: str) -> tuple
         if os.path.isfile(cached) and os.path.getsize(cached) > 0:
             return os.path.normpath(cached), mmproj_repo
 
-    mmproj_path = _download_gguf(mmproj_repo, mmproj_file, cache_dir)
+    revision = registry_entry.get("hf_revision") if mmproj_repo == repo_id else None
+    download_options = {"revision": revision} if revision else {}
+    mmproj_path = _download_gguf(mmproj_repo, mmproj_file, cache_dir, **download_options)
     return os.path.normpath(mmproj_path), mmproj_repo
 
 
@@ -1338,7 +1362,10 @@ def _positive_llama_build(value: str):
 
     import re
 
-    match = re.search(r"version:\s*b?(\d+)\b", str(value or ""), re.IGNORECASE)
+    text = str(value or "")
+    match = re.search(r"^version:.*?\(build\s+b?(\d+)\b", text, re.IGNORECASE | re.MULTILINE)
+    if not match:
+        match = re.search(r"^version:\s*b?(\d+)(?:\s|$)", text, re.IGNORECASE | re.MULTILINE)
     if not match:
         return None
     build = int(match.group(1))
@@ -1357,7 +1384,7 @@ def _llama_release_build(tag: str):
     return build if build > 0 else None
 
 
-def _llama_release_has_assets(release_info: dict, asset_specs) -> bool:
+def _llama_release_has_assets(release_info: dict, asset_specs, minimum_build=MIN_LLAMA_BUILD) -> bool:
     """Return whether a release is a new-enough binary ``bNNNN`` build.
 
     llama.cpp's stable releases are now lightweight version pointers (for
@@ -1370,7 +1397,7 @@ def _llama_release_has_assets(release_info: dict, asset_specs) -> bool:
     if not isinstance(release_info, dict):
         return False
     build = _llama_release_build(release_info.get("tag_name", ""))
-    if build is None or build < MIN_LLAMA_BUILD:
+    if build is None or build < minimum_build:
         return False
 
     assets = release_info.get("assets", [])
@@ -1538,7 +1565,7 @@ def _llama_server_build(exe_path: str):
     return None
 
 
-def _ensure_llama_server(bin_dir: str, device: str = "cpu") -> None:
+def _ensure_llama_server(bin_dir: str, device: str = "cpu", *, minimum_tag=None) -> None:
     """Auto-download llama-server from llama.cpp GitHub releases if missing.
 
     Picks the appropriate prebuilt binary for the current platform:
@@ -1556,7 +1583,8 @@ def _ensure_llama_server(bin_dir: str, device: str = "cpu") -> None:
 
     Side effect: writes binaries to bin_dir/. Idempotent — exits early
     if a new-enough exe already exists; re-downloads the latest if the
-    installed build is older than MIN_LLAMA_BUILD.
+    installed build is older than the required runtime, including any
+    higher model-specific floor.
     """
     import sys
     import json
@@ -1569,6 +1597,8 @@ def _ensure_llama_server(bin_dir: str, device: str = "cpu") -> None:
     is_windows = sys.platform.startswith("win")
     is_linux = sys.platform.startswith("linux")
     linux_cuda = is_linux and device == "cuda"
+    fallback_tag = minimum_tag or FALLBACK_LLAMA_TAG
+    minimum_build = _llama_release_build(minimum_tag) or MIN_LLAMA_BUILD
     exe_name = "llama-server.exe" if is_windows else "llama-server"
     exe_path = os.path.join(bin_dir, exe_name)
     exe_exists = os.path.isfile(exe_path)
@@ -1590,10 +1620,13 @@ def _ensure_llama_server(bin_dir: str, device: str = "cpu") -> None:
 
     known_build = reported_build or receipt_build
     needs_executable = not exe_exists or broken_libraries
-    if exe_exists and known_build is not None and known_build < MIN_LLAMA_BUILD:
+    if exe_exists and (
+        (known_build is not None and known_build < minimum_build)
+        or (known_build is None and minimum_tag is not None)
+    ):
         needs_executable = True
         print(
-            f"[LLM] llama-server build {known_build} < required {MIN_LLAMA_BUILD}; "
+            f"[LLM] llama-server build {known_build or 'unknown'} requires {minimum_build} or newer; "
             "upgrading to the latest llama.cpp release."
         )
 
@@ -1682,7 +1715,7 @@ def _ensure_llama_server(bin_dir: str, device: str = "cpu") -> None:
     else:
         print("[LLM] Resolving the latest compatible llama.cpp release...")
     release_info = None
-    tag = FALLBACK_LLAMA_TAG
+    tag = fallback_tag
 
     def _github_json(url: str) -> dict:
         req = Request(
@@ -1700,9 +1733,9 @@ def _ensure_llama_server(bin_dir: str, device: str = "cpu") -> None:
         latest_release = _github_json(
             "https://api.github.com/repos/ggml-org/llama.cpp/releases/latest"
         )
-        if _llama_release_has_assets(latest_release, asset_specs):
+        if _llama_release_has_assets(latest_release, asset_specs, minimum_build):
             release_info = latest_release
-            tag = str(release_info.get("tag_name", FALLBACK_LLAMA_TAG))
+            tag = str(release_info.get("tag_name", fallback_tag))
         else:
             pointer_url = _llama_nightly_pointer_url(latest_release)
             if not pointer_url:
@@ -1716,7 +1749,7 @@ def _ensure_llama_server(bin_dir: str, device: str = "cpu") -> None:
             with urlopen(pointer_request, timeout=15) as response:
                 nightly_tag = response.read(64).decode("utf-8", errors="replace").strip()
             nightly_build = _llama_release_build(nightly_tag)
-            if nightly_build is None or nightly_build < MIN_LLAMA_BUILD:
+            if nightly_build is None or nightly_build < minimum_build:
                 raise RuntimeError(
                     f"nightly pointer returned incompatible tag {nightly_tag!r}"
                 )
@@ -1724,7 +1757,7 @@ def _ensure_llama_server(bin_dir: str, device: str = "cpu") -> None:
                 "https://api.github.com/repos/ggml-org/llama.cpp/releases/tags/"
                 f"{quote(nightly_tag, safe='')}"
             )
-            if not _llama_release_has_assets(candidate, asset_specs):
+            if not _llama_release_has_assets(candidate, asset_specs, minimum_build):
                 raise RuntimeError(
                     f"nightly release {nightly_tag} lacks the required platform assets"
                 )
@@ -1745,9 +1778,9 @@ def _ensure_llama_server(bin_dir: str, device: str = "cpu") -> None:
         print(
             f"[LLM] Could not resolve a compatible current llama.cpp binary ({e}); "
             "falling back to pinned tag "
-            f"{FALLBACK_LLAMA_TAG}"
+            f"{fallback_tag}"
         )
-        tag = FALLBACK_LLAMA_TAG
+        tag = fallback_tag
         release_info = None
 
     if linux_cuda:
@@ -1845,7 +1878,7 @@ def _ensure_llama_server(bin_dir: str, device: str = "cpu") -> None:
     print(f"[LLM] llama-server installed to {exe_path}")
 
 
-def _get_server_exe(device: str = "cpu") -> str:
+def _get_server_exe(device: str = "cpu", *, minimum_tag=None) -> str:
     """Find the llama-server executable, downloading it on first use if missing.
 
     Lazy-download pattern matches the model-weights flow: nothing is
@@ -1854,7 +1887,8 @@ def _get_server_exe(device: str = "cpu") -> str:
     subsequent loads are instant.
     """
     bin_dir = os.path.abspath(os.environ.get("MAESTRO_LLAMA_BIN", DEFAULT_BIN_DIR))
-    _ensure_llama_server(bin_dir, device=device)
+    runtime_options = {"minimum_tag": minimum_tag} if minimum_tag else {}
+    _ensure_llama_server(bin_dir, device=device, **runtime_options)
     if os.name == "nt":
         return os.path.join(bin_dir, "llama-server.exe")
     return os.path.join(bin_dir, "llama-server")
@@ -2017,7 +2051,9 @@ def load_model(
         print(f"[LLM] Loading model: {repo_id} on {device}")
 
         # Detect CPU-only/missing CUDA runtimes before downloading large weights.
-        server_exe = _get_server_exe(device=device)
+        minimum_tag = registry_entry.get("llama_min_tag")
+        runtime_options = {"minimum_tag": minimum_tag} if minimum_tag else {}
+        server_exe = _get_server_exe(device=device, **runtime_options)
         if mtp_active:
             _check_mtp_runtime_capability(server_exe)
         cuda_devices = []
@@ -2041,7 +2077,9 @@ def load_model(
         cache_dir = os.path.join(base_cache_dir, dir_override or model_stem)
         os.makedirs(cache_dir, exist_ok=True)
 
-        gguf_path = _download_gguf(repo_id, gguf_file, cache_dir)
+        revision = registry_entry.get("hf_revision")
+        download_options = {"revision": revision} if revision else {}
+        gguf_path = _download_gguf(repo_id, gguf_file, cache_dir, **download_options)
         gguf_path = os.path.normpath(gguf_path)
 
         # Try to download mmproj for vision support (optional — not all models have it)

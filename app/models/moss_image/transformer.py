@@ -50,11 +50,12 @@ def _cache_empty(cache):
     return getattr(cache, "k", None) is None or getattr(cache, "v", None) is None
 
 
-def attend(x_list, projections, q_norm, k_norm, rope, heads, reference_kv=None, capture=None):
+def attend(x_list, projections, q_norm, k_norm, rope, heads, reference_kv=None, capture=None, out_proj=None):
     def normalize(q, k, group):
+        rows_start = 0 if group.rows is None or group.rows.start is None else group.rows.start
         for tensor, norm in ((q, q_norm), (k, k_norm)):
             if tensor is not None:
-                ops.rows_(tensor, lambda part, first, last: rotate(norm(part), rope[:, first:last]))
+                ops.rows_(tensor, lambda part, first, last: rotate(norm(part), rope[:, rows_start + first:rows_start + last]))
 
     def attention_with_reference(qkv, group):
         if capture is not None:
@@ -73,14 +74,17 @@ def attend(x_list, projections, q_norm, k_norm, rope, heads, reference_kv=None, 
         return pay_attention(qkv, recycle_q=True)
 
     custom_attention = attention_with_reference if reference_kv is not None or capture is not None else None
-    return attention_kit.qkv_attention(
+    result = attention_kit.qkv_attention(
         x_list,
         *projections,
         heads,
         q_norm.weight.numel(),
         normalize,
         attention_group_fn=custom_attention,
-    ).flatten(2)
+        out_proj=out_proj,
+        norm_rope_rows=True,
+    )
+    return result if out_proj is not None else result.flatten(2)
 
 
 class TextBlock(nn.Module):
@@ -95,7 +99,10 @@ class TextBlock(nn.Module):
         self.ffn_down = nn.Linear(ffn_dim, dim)
 
     def forward(self, x, rope):
-        x = x + self.proj(attend([self.norm1(x)], (self.q, self.k, self.v), self.q_norm, self.k_norm, rope, self.heads))
+        x = x + attend(
+            [self.norm1(x)], (self.q, self.k, self.v), self.q_norm, self.k_norm,
+            rope, self.heads, out_proj=self.proj,
+        )
         y = self.norm2(x)
         return x + self.ffn_down(situ(self.ffn_up(y), self.ffn_gate(y)))
 
@@ -130,8 +137,9 @@ class Block(nn.Module):
             self.heads,
             reference_kv=reference_kv,
             capture=capture,
+            out_proj=self.proj['o'],
         )
-        ops.gated_residual_(x, [self.proj['o'](attended)], gate_a[:, None])
+        ops.gated_residual_(x, [attended], gate_a[:, None])
         del attended
         chunk = math.ceil(x.shape[1] / self.expansion) if x.shape[1] > 1024 else x.shape[1]
         for start in range(0, x.shape[1], chunk):

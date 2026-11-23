@@ -70,3 +70,11 @@ This component notice does not replace the existing license for the rest
 of Maestro or the separate licenses of third-party components. Original
 copyright and license notices remain in their source directories. Maestro
 is an independent adaptation; no affiliation or endorsement is implied.
+
+WanGP 20.10 pi-H3 DWD
+---------------------
+
+The upstream modifications in app/models/minimax_h3/dwd.py and
+app/models/minimax_h3/sol_decoder.py come from DeepBeepMeep/WanGP revision
+994642c87b02ef0abbdc1bc73dd14f6b5e4497e8. The matching WanGP Community
+License 2.0 is included at app/models/minimax_h3/LICENSE-WanGP-Community-2.0.txt.

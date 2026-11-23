@@ -1462,6 +1462,8 @@ export interface SystemConfig {
   active_fish_supported?: boolean | null
   active_fish_limitation?: string | null
   attention_mode: string
+  sagegp_first_step_precise?: boolean
+  inputs_chunker?: 'off' | 'auto' | 'on' | 'extreme'
   transformer_quantization: string
   vae_config: number
   compile: string

@@ -4,7 +4,7 @@ import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from importlib.metadata import version
+from shared.sagegp_runtime import sageattention_version
 
 def clear_list(l):
     for i in range(len(l)):
@@ -73,7 +73,7 @@ def get_attention_modes():
         ret.append("xformers")
     if sageattn_varlen_wrapper != None:
         ret.append("sage")
-    if sageattn != None and version("sageattention").startswith("2") :
+    if sageattn is not None and sageattention_version().startswith("2"):
         ret.append("sage2")
 
     return ret

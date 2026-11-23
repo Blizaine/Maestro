@@ -307,13 +307,16 @@ def find_minimax_h3_pdd_loras(paths) -> list[str]:
 
 
 def find_minimax_h3_accelerators(paths) -> list[str]:
-    """Return each selected H3 Turbo/PDD accelerator in request order."""
+    """Return each selected H3 fixed-schedule accelerator in request order."""
+
+    from .pi_h3 import is_pi_h3_accelerator
 
     return [
         str(path)
         for path in (paths or [])
         if is_minimax_h3_turbo_lora(str(path))
         or is_minimax_h3_pdd_lora(str(path))
+        or is_pi_h3_accelerator(str(path))
     ]
 
 
