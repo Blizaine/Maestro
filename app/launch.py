@@ -12165,12 +12165,18 @@ def _generation_sidecar_params(
 
     from services.director_clip_settings import json_safe_generation_params
 
-    return json_safe_generation_params(
+    safe_params = json_safe_generation_params(
         params,
         path_params=path_params,
         attachment_keys=attachment_keys,
         omit_keys={"_reviewed_h3_runtime_geometry", "_h3_output_audio_path"},
     )
+    # Per-clip runtime audio paths live inside this scheduling record. The
+    # source-shaped H3 manifest is already preserved separately for retries.
+    multi_clip = safe_params.get("multi_clip_info")
+    if params.get("_h3_output_audio_path") and isinstance(multi_clip, dict):
+        multi_clip.pop("concat_audio_path", None)
+    return safe_params
 
 
 def _director_clip_sidecar_timing(
@@ -12536,6 +12542,10 @@ async def _prepare_generation_submission(
                     body.pop("audio_guide", None)
                     body.pop("input_waveform", None)
                     body["audio_prompt_type"] = ""
+                # The reference-selected track is authoritative for this
+                # request. A stale concat soundtrack from older settings must
+                # not override it or be retained alongside its derived path.
+                body.pop("multi_clip_concat_audio", None)
                 body["_h3_output_audio_path"] = output_only_audio_path
             else:
                 body.pop("_h3_output_audio_path", None)

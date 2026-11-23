@@ -11067,6 +11067,12 @@ def generate_video(
                 # the final mux below; keep it out of saved metadata and H3
                 # runtime inputs.
                 inputs.pop("_h3_output_audio_path", None)
+                # The full source path is needed for the live hard-cut join,
+                # but is request-only and should not appear in saved settings.
+                if _h3_output_audio_path and isinstance(inputs.get("multi_clip_info"), dict):
+                    saved_multi_clip_info = dict(inputs["multi_clip_info"])
+                    saved_multi_clip_info.pop("concat_audio_path", None)
+                    inputs["multi_clip_info"] = saved_multi_clip_info
                 # Only the window-local context belongs in output prompts.
                 # The full source transcript stays in its private ASR cache.
                 inputs.pop("source_audio_transcript_data", None)

@@ -432,6 +432,10 @@ class H3VideoAudioRoleTests(unittest.TestCase):
             if keyword.arg == "omit_keys"
         ))
         self.assertIn("_h3_output_audio_path", omitted)
+        sidecar_source = ast.get_source_segment(
+            launch_path.read_text(encoding="utf-8"), sidecar,
+        )
+        self.assertIn('multi_clip.pop("concat_audio_path", None)', sidecar_source)
 
         prepare = next(
             node for node in launch_tree.body
@@ -456,6 +460,7 @@ class H3VideoAudioRoleTests(unittest.TestCase):
         self.assertIn("_h3_output_audio_path", argument_names)
         generate_source = ast.get_source_segment(wgp_source, generate)
         self.assertIn('inputs.pop("_h3_output_audio_path", None)', generate_source)
+        self.assertIn('saved_multi_clip_info.pop("concat_audio_path", None)', generate_source)
         self.assertIn("slice_audio_file_from_frame", generate_source)
         self.assertIn("new_audio_tracks = [_h3_output_audio_path]", generate_source)
 
