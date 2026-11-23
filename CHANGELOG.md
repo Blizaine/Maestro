@@ -50,6 +50,10 @@ Public Dev testing release.
   compile opt-outs. Fix FlashVSR streamed cache shapes and padding, omit
   unsupported fields from compatible Gemini requests and improve LTX 2.5
   second-pass failure reporting and cleanup.
+- Fix legacy Python 3.10 updates in Pinokio by resolving the pinned ONNX Runtime
+  GPU wheel across the configured package indexes. Retrying Update completes
+  setup if an older launcher hit this error after pulling the fix.
+  [Issue #241](https://github.com/Blizaine/Maestro/issues/241)
 
 ## [4.1.1] — 2026-11-10
 

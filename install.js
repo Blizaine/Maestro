@@ -102,6 +102,14 @@ module.exports = async (kernel) => {
         ]
       }
     },
+    {
+      when: Boolean(runtime.requirementsMarker),
+      method: "fs.write",
+      params: {
+        path: runtime.requirementsMarker,
+        text: "Legacy runtime setup completed.\n"
+      }
+    },
     // SAM 3.1 segmentation service (used by experimental Inpaint mode)
     // is intentionally NOT installed here. It adds ~5+ minutes to a
     // fresh install (separate Python 3.12 conda env, torch wheels,

@@ -5,8 +5,13 @@ const {
 module.exports = async (kernel) => {
   const runtime = runtimeProfile(kernel)
   const samReadyMarker = "app/services/sam/env/.maestro-sam-ready"
+  // Pinokio can keep the old update steps for the run that pulls this fix.
+  // Retry an already-current legacy checkout until its fixed update finishes.
+  const requirementsReady = runtime.requirementsMarker
+    ? `exists('${runtime.requirementsMarker}')`
+    : "true"
   const alreadyCurrentAndReady =
-    `{{/already up[- ]to[- ]date/i.test(input.stdout) && exists('${runtime.marker}') && exists('${runtime.flashMarker}') && exists('ui/dist/index.html') && exists('ui/dist/assets') && (!exists('app/services/sam/env') || exists('${samReadyMarker}')) ? 'uptodate' : 'build'}}`
+    `{{/already up[- ]to[- ]date/i.test(input.stdout) && exists('${runtime.marker}') && exists('${runtime.flashMarker}') && ${requirementsReady} && exists('ui/dist/index.html') && exists('ui/dist/assets') && (!exists('app/services/sam/env') || exists('${samReadyMarker}')) ? 'uptodate' : 'build'}}`
   return {
     run: [{
     // Pull the latest launcher + app code (single monorepo, so this one
@@ -95,7 +100,7 @@ module.exports = async (kernel) => {
       venv: runtime.env,
       venv_python: runtime.python,
       path: "app",
-      message: "uv pip install -r requirements.txt"
+      message: "uv pip install -r requirements.txt --index-strategy unsafe-best-match"
     }
   }, {
     // Keep the control plane's CPU-only dependencies out of every CUDA model
@@ -185,6 +190,13 @@ module.exports = async (kernel) => {
     method: "script.start",
     params: {
       uri: "sam_install.js"
+    }
+  }, {
+    when: Boolean(runtime.requirementsMarker),
+    method: "fs.write",
+    params: {
+      path: runtime.requirementsMarker,
+      text: "Legacy runtime setup completed.\n"
     }
     }]
   }

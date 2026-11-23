@@ -163,5 +163,44 @@ require('./update.js')({gpu:'nvidia',gpu_target:'sm_89',gpu_driver:'610.88',plat
         ))
 
 
+    def test_legacy_update_retries_after_the_fix_was_already_pulled(self):
+        result = self.evaluate("""
+const vm = require('node:vm');
+const {runtimeProfile} = require('./scripts/pinokio/launcher_profile');
+const kernel = {gpu:'nvidia', gpu_target:'sm_89', gpu_driver:'577.00', platform:'win32'};
+const runtime = runtimeProfile(kernel);
+Promise.all([require('./update.js')(kernel), require('./install.js')(kernel)]).then(([update, install]) => {
+  const marker = 'app/env/.maestro_legacy_requirements_v1.installed';
+  const files = new Set([runtime.marker, runtime.flashMarker, 'ui/dist/index.html', 'ui/dist/assets']);
+  const route = update.run.find(step => step.method === 'jump').params.id.slice(2, -2);
+  const select = stdout => vm.runInNewContext(route, {input: {stdout}, exists: file => files.has(file)});
+  const interrupted = select('Already up to date.');
+  files.add(marker);
+  const installerStep = install.run.find(step =>
+    step.params?.message?.[0]?.startsWith('uv pip install -r requirements.txt'));
+  const updateStep = update.run.find(step =>
+    typeof step.params?.message === 'string'
+    && step.params.message.startsWith('uv pip install -r requirements.txt'));
+  process.stdout.write(JSON.stringify({
+    interrupted, ready: select('Already up to date.'), newCommits: select('Updating abc1234..def5678'),
+    installerCommand: installerStep.params.message[0], updateStep: updateStep.params,
+    finishStep: update.run.at(-1), installerMarker: install.run.find(step => step.method === 'fs.write')
+  }));
+});
+""")
+        self.assertEqual(result["interrupted"], "build")
+        self.assertEqual(result["ready"], "uptodate")
+        self.assertEqual(result["newCommits"], "build")
+        update = result["updateStep"]
+        self.assertEqual((update["path"], update["venv"], update["venv_python"]),
+                         ("app", "env", "3.10"))
+        self.assertEqual(update["message"], result["installerCommand"])
+        self.assertIn("--index-strategy unsafe-best-match", update["message"])
+        for step in (result["finishStep"], result["installerMarker"]):
+            self.assertTrue(step["when"])
+            self.assertEqual(step["method"], "fs.write")
+            self.assertEqual(step["params"]["path"], "app/env/.maestro_legacy_requirements_v1.installed")
+
+
 if __name__ == "__main__":
     unittest.main()

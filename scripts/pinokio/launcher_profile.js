@@ -57,6 +57,7 @@ const legacyRuntimeProfile = (kernel = {}) => {
     env: "env",
     python: "3.10",
     marker: "app/env/.maestro_torch_v1.installed",
+    requirementsMarker: "app/env/.maestro_legacy_requirements_v1.installed",
     // The pinned Windows 2.7.4 wheel contains only sm_89 cubins. Bump the
     // marker for older GPUs so Update removes the incompatible package once.
     flashMarker: legacyWindowsFlashSupported
