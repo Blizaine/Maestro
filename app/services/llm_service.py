@@ -748,6 +748,8 @@ def provider_api_key(provider: str, services: dict) -> str:
     return str(services.get(setting, "") or "")
 
 
+_REPORTED_DROPPED_FIELDS: set[tuple[str, tuple[str, ...]]] = set()
+
 _OPENAI_CHAT_FIELDS = frozenset({
     "messages",
     "model",
@@ -847,10 +849,16 @@ def _finalize_payload(payload: dict) -> dict:
         if key in _OPENAI_CHAT_FIELDS and key not in provider_unsupported_fields
     }
     dropped = sorted(set(payload) - set(prepared))
-    if dropped:
+    # Every request is built for local llama-server first, so the same
+    # fields are removed on every hosted call. Report each set once per
+    # session; repeating it on every call reads like a recurring failure.
+    report_key = (_provider, tuple(dropped))
+    if dropped and report_key not in _REPORTED_DROPPED_FIELDS:
+        _REPORTED_DROPPED_FIELDS.add(report_key)
         print(
             f"[LLM] Dropped {len(dropped)} request field(s) not accepted "
-            f"by provider={_provider}: {', '.join(dropped)}"
+            f"by provider={_provider}: {', '.join(dropped)} "
+            "(expected; shown once per session)"
         )
     prepared["model"] = _model_id
     return record_payload(prepared, model_id=_model_id)

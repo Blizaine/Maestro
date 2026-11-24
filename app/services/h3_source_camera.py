@@ -467,6 +467,19 @@ class SourceCameraProof:
         return True
 
 
+def _with_sound_effects(card: Any) -> Any:
+    """Treat an omitted sound_effects field as no added effect.
+
+    Remote writers that do not receive the strict schema often drop this
+    field, especially when a supplied soundtrack owns all sound. Every other
+    card field stays strictly validated.
+    """
+
+    if isinstance(card, Mapping) and "sound_effects" not in card:
+        return {**card, "sound_effects": ""}
+    return card
+
+
 class SourceCameraContract:
     """Strict camera-only schema plus compiler-owned source action phases."""
 
@@ -612,7 +625,7 @@ class SourceCameraContract:
             source_index = 0
             old_event: dict[str, Any] = {}
             if plan.opening:
-                opening_draft = raw_event["opening"]
+                opening_draft = _with_sound_effects(raw_event["opening"])
                 self._validate_card(
                     opening_draft, opening=True,
                     location=f"event_cards.{event_key}: opening",
@@ -631,7 +644,7 @@ class SourceCameraContract:
             old_phases: list[dict[str, str]] = []
             for output_index, phase in enumerate(plan.phases[source_index:], start=1):
                 phase_key = f"phase_{output_index}"
-                phase_draft = raw_event[phase_key]
+                phase_draft = _with_sound_effects(raw_event[phase_key])
                 self._validate_card(
                     phase_draft,
                     location=f"event_cards.{event_key}: {phase_key}",

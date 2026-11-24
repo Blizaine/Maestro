@@ -2633,6 +2633,17 @@ def _is_pending_boarding_relation(
     )
 
 
+def _event_action_signature(event: dict[str, Any]) -> tuple[Any, ...]:
+    """Identify events that no prompt text could tell apart."""
+
+    return (
+        _normal_text(event.get("text")),
+        str(event.get("kind") or "").casefold(),
+        frozenset(_normal_text(alias) for alias in _aliases(event, "actor_aliases")),
+        frozenset(_normal_text(alias) for alias in _aliases(event, "target_aliases")),
+    )
+
+
 def music_narrative_row_issue(
     row: Any,
     *,
@@ -2675,6 +2686,15 @@ def music_narrative_row_issue(
     ending_beat = row.get("ending_beat")
     if isinstance(ending_beat, str) and ending_beat.strip():
         future_prompt = f"{prompt}\n{ending_beat}"
+    # A repeated source action (for example "stops lipsyncing" written four
+    # times) yields identical events in several clips. Covering this clip's
+    # own copy is indistinguishable from covering a later copy, so a later
+    # identical copy cannot count as performed early.
+    own_signatures = {
+        _event_action_signature(event_by_id[event_id])
+        for event_id in expected
+        if event_id in event_by_id
+    }
     for event in events:
         event_id = str(event.get("event_id") or "")
         assigned_index = assignments.get(event_id)
@@ -2682,6 +2702,7 @@ def music_narrative_row_issue(
         if (
             assigned_index is not None
             and index < assigned_index
+            and _event_action_signature(event) not in own_signatures
             and _event_coverage_positions(future_prompt, row_event)
         ):
             return (
