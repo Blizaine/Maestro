@@ -38,6 +38,52 @@ def pi_h3_sigmas(steps: int, shift: float = 12.0) -> list[float]:
     return (shift * raw / (1.0 + (shift - 1.0) * raw)).tolist()
 
 
+def _map_pi_h3_audio_sigmas(
+    video_sigmas,
+    *,
+    video_shift: float = 12.0,
+    audio_shift: float = 3.0,
+):
+    """Map pi-H3's trained video grid onto H3's paired audio flow grid."""
+    import torch
+
+    video_sigmas = torch.as_tensor(video_sigmas, dtype=torch.float32)
+    base_sigmas = video_sigmas / (
+        float(video_shift) + video_sigmas * (1.0 - float(video_shift))
+    )
+    return float(audio_shift) * base_sigmas / (
+        1.0 + (float(audio_shift) - 1.0) * base_sigmas
+    )
+
+
+def _scale_pi_h3_initial_noise(
+    video_rows,
+    audio_rows,
+    layout,
+    *,
+    num_audio_latents: int,
+    audio_channels: int,
+    video_sigma,
+    audio_sigma,
+) -> None:
+    """Scale generated Pi-H3 noise while leaving attached condition rows clean."""
+    video_start = int(layout.num_condition_video_rows)
+    video_stop = int(video_rows.shape[0]) - int(
+        layout.num_target_condition_video_rows
+    )
+    if video_stop > video_start:
+        video_rows[video_start:video_stop].mul_(video_sigma.to(video_rows))
+
+    audio_start = int(layout.num_condition_audio_rows)
+    conditioned_latents = int(layout.num_target_condition_audio_latents)
+    if int(num_audio_latents) > conditioned_latents:
+        audio_stop = audio_start + int(num_audio_latents) * int(audio_channels)
+        target_audio = audio_rows[audio_start:audio_stop].view(
+            int(audio_channels), int(num_audio_latents), -1
+        )
+        target_audio[:, conditioned_latents:].mul_(audio_sigma.to(audio_rows))
+
+
 def pi_h3_adapter_steps(path: str) -> int | None:
     """Recognize the two official regular pi-H3 FL2VA LoRAs by basename."""
     basename = PurePosixPath(str(path or "").replace("\\", "/")).name.lower()

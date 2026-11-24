@@ -23,6 +23,8 @@ if str(APP) not in sys.path:
 
 from models.minimax_h3.minimax_h3_handler import family_handler
 from models.minimax_h3.pi_h3 import (
+    _map_pi_h3_audio_sigmas,
+    _scale_pi_h3_initial_noise,
     pi_h3_adapter_steps,
     pi_h3_dwd_adapter_steps,
     pi_h3_lora_incompatibility,
@@ -55,6 +57,75 @@ class PiH3PresetTests(unittest.TestCase):
             self.assertEqual(len(actual), steps)
             for got, expected in zip(actual, trained):
                 self.assertTrue(math.isclose(got, expected, rel_tol=0, abs_tol=1e-5))
+
+    def test_trained_video_grids_map_to_the_official_paired_audio_grids(self):
+        expected_audio_grids = {
+            2: [0.9755245, 0.61634755, 0.0],
+            4: [0.9863015, 0.8715084, 0.69064754, 0.36363637, 0.0],
+        }
+        for steps, expected in expected_audio_grids.items():
+            with self.subTest(steps=steps):
+                video = torch.tensor(
+                    [*pi_h3_sigmas(steps, 12.0), 0.0], dtype=torch.float32
+                )
+                audio = _map_pi_h3_audio_sigmas(
+                    video, video_shift=12.0, audio_shift=3.0
+                )
+                torch.testing.assert_close(
+                    audio,
+                    torch.tensor(expected, dtype=torch.float32),
+                    rtol=0,
+                    atol=1e-6,
+                )
+
+    def test_initial_noise_scaling_preserves_attached_condition_rows(self):
+        from types import SimpleNamespace
+
+        layout = SimpleNamespace(
+            num_condition_video_rows=2,
+            num_target_condition_video_rows=2,
+            num_condition_audio_rows=2,
+            num_target_condition_audio_latents=1,
+        )
+        video_rows = torch.ones((8, 3), dtype=torch.float32)
+        audio_rows = torch.ones((8, 3), dtype=torch.float32)
+        _scale_pi_h3_initial_noise(
+            video_rows,
+            audio_rows,
+            layout,
+            num_audio_latents=3,
+            audio_channels=2,
+            video_sigma=torch.tensor(0.5),
+            audio_sigma=torch.tensor(0.25),
+        )
+        torch.testing.assert_close(video_rows[:2], torch.ones((2, 3)))
+        torch.testing.assert_close(video_rows[2:6], torch.full((4, 3), 0.5))
+        torch.testing.assert_close(video_rows[6:], torch.ones((2, 3)))
+        torch.testing.assert_close(audio_rows[:3], torch.ones((3, 3)))
+        torch.testing.assert_close(audio_rows[3:5], torch.full((2, 3), 0.25))
+        torch.testing.assert_close(audio_rows[5:6], torch.ones((1, 3)))
+        torch.testing.assert_close(audio_rows[6:8], torch.full((2, 3), 0.25))
+
+    def test_initial_noise_scaling_handles_zero_audio_latents(self):
+        from types import SimpleNamespace
+
+        layout = SimpleNamespace(
+            num_condition_video_rows=0,
+            num_target_condition_video_rows=0,
+            num_condition_audio_rows=0,
+            num_target_condition_audio_latents=0,
+        )
+        video_rows = torch.empty((0, 3), dtype=torch.float32)
+        audio_rows = torch.empty((0, 3), dtype=torch.float32)
+        _scale_pi_h3_initial_noise(
+            video_rows,
+            audio_rows,
+            layout,
+            num_audio_latents=0,
+            audio_channels=2,
+            video_sigma=torch.tensor(0.5),
+            audio_sigma=torch.tensor(0.25),
+        )
 
     def test_adapter_names_and_model_compatibility_are_workflow_specific(self):
         self.assertEqual(

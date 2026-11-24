@@ -9046,6 +9046,8 @@ def generate_video(
         errors = check_loras_exist(model_type, activated_loras, True, send_cmd)
         if len(errors) > 0 : raise gr.Error(errors)
         loras_selected += [ resolve_lora_path(model_type, lora) for lora in activated_loras]
+    elif loras_selected:
+        print(f"[LoRA] Using model-provided LoRAs: {[os.path.basename(lora) for lora in loras_selected]}")
     else:
         print(f"[LoRA] No LoRAs activated for this generation (model_type={model_type})")
 

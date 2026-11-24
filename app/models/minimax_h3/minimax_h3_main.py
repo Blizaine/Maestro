@@ -107,6 +107,8 @@ from .turbo import (
     minimax_h3_turbo_preset_for_path,
 )
 from .pi_h3 import (
+    _map_pi_h3_audio_sigmas,
+    _scale_pi_h3_initial_noise,
     pi_h3_adapter_steps,
     pi_h3_dwd_adapter_steps,
     pi_h3_sigmas,
@@ -4175,13 +4177,31 @@ class MiniMaxH3Model:
         if pi_steps:
             self.scheduler.set_solver("euler")
             self.scheduler.set_shift(12.0)
+            self.audio_scheduler.set_shift(3.0)
             self.scheduler.set_timesteps(
                 sigmas=[*pi_h3_sigmas(pi_steps, 12.0), 0.0],
                 device=self.device,
             )
+            self.audio_scheduler.set_timesteps(
+                sigmas=_map_pi_h3_audio_sigmas(
+                    self.scheduler.sigmas,
+                    video_shift=12.0,
+                    audio_shift=3.0,
+                ),
+                device=self.device,
+            )
+            _scale_pi_h3_initial_noise(
+                video_rows,
+                audio_rows,
+                layout,
+                num_audio_latents=num_audio_latents,
+                audio_channels=MINIMAX_H3_AUDIO_CHANNELS,
+                video_sigma=self.scheduler.sigmas[0],
+                audio_sigma=self.audio_scheduler.sigmas[0],
+            )
             print(
-                f"[pi-H3] Using the trained {pi_steps}-step FL2VA video schedule "
-                "(Euler, video shift 12, native H3 audio schedule)."
+                f"[pi-H3] Using the trained {pi_steps}-step FL2VA paired schedule "
+                "(Euler, video/audio shifts 12/3; initial target noise scaled)."
             )
         if self.remake_mode is not None and not aligned_guide:
             from .viggle_remake import sigmas as remake_sigmas
