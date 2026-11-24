@@ -181,7 +181,7 @@ video-then-edited-image reference ordering, target-only control slicing after
 the motion-history prefix, three Euler evaluations with shift 3, and fixed
 124-frame windows with 18-frame overlap. The dedicated transformer, fixed
 prompt and distillation adapter are pinned to
-`DeepBeepMeep/MiniMax-H3@fa7ed035f21d341439d4dd763a020fc4a2482c43`.
+`DeepBeepMeep/MiniMax-H3@630975da14fd3c84169d6cd5092da3ce1287d137`.
 The upstream rank-8 adapter map is pinned to the same Wan2GP commit and verified
 with SHA-256 `89081fd235e9deff56274ab76b1b01fa4d9aeebcbd0746295b0fd086cf0e0fec`.
 Maestro retains its own queue, media pipeline, MMGP offloading and continuation
