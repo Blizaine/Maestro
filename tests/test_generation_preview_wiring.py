@@ -18,6 +18,7 @@ sys.path.insert(0, str(APP))
 
 from services.generation_preview import configured_preview_mode, preview_mode
 from services.memory_runtime import RuntimeSelection
+from shared import sagegp_runtime
 
 
 def legacy_runtime_selection():
@@ -109,6 +110,7 @@ def make_callback(mode="off", decoder=None, sender=None, handler=None, config=No
         "transformer_type": "test-model", "offloadobj": SimpleNamespace(tiny_vae=decoder, preview_notice=None),
         "wan_model": None, "merge_status_context": lambda status, phase: phase,
         "format_time": lambda seconds: "0s",
+        "sagegp_runtime": sagegp_runtime,
     }
     build = isolated_function("wgp.py", "build_callback", namespace)
     callback = build({}, SimpleNamespace(), sender or (lambda cmd, data=None: events.append((cmd, data))),

@@ -17,6 +17,7 @@ sys.path.insert(0, str(APP))
 
 from models.minimax_h3.pika_flex import normalize_pika_flex_attention, validate_pika_flex_request
 from models.minimax_h3.pika_flex_assets import pika_flex_capabilities, pika_flex_defaults
+from shared import sagegp_runtime
 
 
 @pytest.mark.parametrize("mode", ["sage2", "sdpa", "sol", "sla"])
@@ -132,6 +133,7 @@ def test_native_unavailable_sla_default_falls_back_before_h3_dispatch(safe_dense
         "get_auto_attention": lambda: safe_dense,
         "send_cmd": lambda *message: messages.append(message),
         "print": lambda *_args: None,
+        "sagegp_runtime": sagegp_runtime,
     }
     exec(_load_wgp_attention_helpers(), namespace)
 
@@ -158,6 +160,7 @@ def test_supported_sla_default_stays_sparse():
         "get_auto_attention": lambda: "sage2",
         "send_cmd": lambda *_args: None,
         "print": lambda *_args: None,
+        "sagegp_runtime": sagegp_runtime,
     }
     exec(_load_wgp_attention_helpers(), namespace)
     result = namespace["select_attention"](
