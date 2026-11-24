@@ -27,6 +27,16 @@ Based on [TheRock's official support matrix](https://github.com/ROCm/TheRock/blo
 
 ### Also supported:
 ### **gfx103X-dgpu**: (RDNA 2)
+* AMD RX 6800 XT (gfx1030)
+* AMD RX 6800 (gfx1030)
+* AMD RX 6700 XT (gfx1031)
+* AMD RX 6700 (gfx1031)
+* AMD RX 6600 XT (gfx1031)
+* AMD RX 6600 (gfx1031)
+* AMD RX 5700 XT (gfx1010)
+* AMD RX 5700 (gfx1010)
+* AMD RX 5600 XT (gfx1010)
+* AMD RX 5300 (gfx1010)
 
 <br>
 
