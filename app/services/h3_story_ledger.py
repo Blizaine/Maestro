@@ -9368,6 +9368,11 @@ def _expand_camera_event_cards(
         if card is None and optional:
             return
         expected_fields = (*fields, "recovery") if opening else fields
+        if isinstance(card, dict) and "sound_effects" not in card:
+            # Remote writers that do not receive the strict schema often drop
+            # this field, especially when a supplied soundtrack owns all sound.
+            # Absence means no added synchronized effect, not a missing action.
+            card = {**card, "sound_effects": ""}
         if not isinstance(card, dict) or set(card) != set(expected_fields) or any(
             not isinstance(card.get(name), str) for name in expected_fields
         ) or not card["action"].strip():
@@ -13550,10 +13555,11 @@ def plan_h3_story_segments(
     from services import llm_service
     from services.studio_enhancement import fidelity_retry_limit
     from services.lora_guidance import with_active_lora_guidance
+    from services.h3_remote_schema import with_remote_structured_output
 
     retry_limit = fidelity_retry_limit()
     generate = with_active_lora_guidance(
-        llm_generate or llm_service.generate,
+        llm_generate or with_remote_structured_output(llm_service.generate),
         lora_system_hint,
     )
 

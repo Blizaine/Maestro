@@ -527,6 +527,72 @@ def safe_delete(path: str, *, retries: int = 3, retry_delay: float = 0.2) -> dic
         return {"deleted": False, "reason": "locked"}
 
 
+def safe_replace(source: str, target: str, *, timeout: float = 30.0,
+                 retry_delay: float = 0.25) -> dict:
+    """Move ``source`` over ``target`` even while ``target`` is being read.
+
+    Windows refuses to replace a file that any process holds open, and that
+    includes readers which passed FILE_SHARE_DELETE, such as the gallery
+    streaming a freshly generated video to the browser. Those readers do
+    allow the open file to be renamed. So the old file is moved to a hidden
+    ``.trash_*`` sibling first, the new file is moved into place, and the old
+    copy is deleted, or queued for deletion until its last reader closes.
+    Readers that did not pass share-delete (ffprobe, thumbnail decoders,
+    antivirus scans) block even the rename. Those holds are brief, so the
+    swap is retried until ``timeout``. If the new file cannot be moved in
+    after the old one was moved aside, the original is put back.
+
+    Returns ``{"replaced": True, "deferred_cleanup": bool}``. Raises the last
+    ``OSError`` when the swap could not be completed in time; ``target`` then
+    still holds the original and ``source`` is untouched.
+    """
+    source, target = os.fspath(source), os.fspath(target)
+    deadline = time.monotonic() + max(0.0, float(timeout))
+    while True:
+        try:
+            os.replace(source, target)
+            return {"replaced": True, "deferred_cleanup": False}
+        except PermissionError as error:
+            if not _IS_WINDOWS:
+                raise
+            last_error: OSError = error
+
+        if os.path.isfile(target):
+            directory = os.path.dirname(target) or "."
+            trash = os.path.join(
+                directory, f".trash_{int(time.time() * 1000)}_{os.path.basename(target)}",
+            )
+            try:
+                os.rename(target, trash)
+            except OSError as error:
+                last_error = error  # held without share-delete; retry below
+            else:
+                try:
+                    os.replace(source, target)
+                except OSError as error:
+                    last_error = error
+                    try:
+                        os.rename(trash, target)
+                    except OSError as restore_error:
+                        raise OSError(
+                            f"Could not move {os.path.basename(source)} into place and "
+                            f"could not restore the original from {trash}: {restore_error}"
+                        ) from error
+                else:
+                    try:
+                        os.remove(trash)
+                        return {"replaced": True, "deferred_cleanup": False}
+                    except OSError:
+                        with _DEFERRED_LOCK:
+                            _DEFERRED_DELETE_QUEUE.append((trash, time.time()))
+                        _ensure_deferred_thread()
+                        return {"replaced": True, "deferred_cleanup": True}
+
+        if time.monotonic() >= deadline:
+            raise last_error
+        time.sleep(retry_delay)
+
+
 def is_trash_name(name: str) -> bool:
     """Return True if `name` looks like a deferred-delete trash file.
 

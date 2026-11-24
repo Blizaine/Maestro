@@ -302,7 +302,11 @@ def process_generation_video(source, destination, *, spatial="", temporal="",
             options=options, abort=abort, progress=progress,
         )
         _check_abort(abort)
-        os.replace(destination, source)
+        # The gallery shows the generated original while finishing runs, so
+        # the browser may be streaming it now; a plain os.replace then fails
+        # on Windows with "Access is denied".
+        from .win_safe_files import safe_replace
+        safe_replace(destination, source)
         return result
     finally:
         with contextlib.suppress(OSError):

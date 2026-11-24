@@ -877,6 +877,71 @@ class MusicNarrativeTests(unittest.TestCase):
         self.assertIsNotNone(issue)
         self.assertIn("out of source order", issue)
 
+    def test_repeated_identical_action_is_not_a_future_copy_of_itself(self):
+        contract = contract_for(
+            "The kitten waves at the crowd. The kitten climbs on the dragon. "
+            "The kitten waves at the crowd."
+        )
+        events = contract["events"]
+        self.assertEqual(events[0]["text"], events[2]["text"])
+        allocation = [
+            {"event_id": "M1", "clip_index": 0},
+            {"event_id": "M2", "clip_index": 1},
+            {"event_id": "M3", "clip_index": 2},
+        ]
+        own_copy = {
+            "source_event_ids": ["M1"],
+            "video_prompt": "The kitten waves at the crowd from the stage.",
+        }
+        self.assertIsNone(music_narrative_row_issue(
+            own_copy, contract=contract, allocation=allocation, index=0,
+        ))
+        last_copy = {
+            "source_event_ids": ["M3"],
+            "video_prompt": "The kitten waves at the crowd one last time.",
+        }
+        self.assertIsNone(music_narrative_row_issue(
+            last_copy, contract=contract, allocation=allocation, index=2,
+        ))
+
+        # A clip that owns no copy still cannot perform the later one early.
+        early = {
+            "source_event_ids": ["M2"],
+            "video_prompt": "The kitten climbs on the dragon and waves at the crowd.",
+        }
+        issue = music_narrative_row_issue(
+            early, contract=contract, allocation=allocation, index=1,
+        )
+        self.assertIsNotNone(issue)
+        self.assertIn("future music narrative event M3", issue)
+
+    def test_repeated_text_with_a_different_actor_is_still_a_future_event(self):
+        contract = {
+            "revision": 1,
+            "source": "",
+            "events": [
+                {"event_id": "M1", "text": "waves at the crowd", "kind": "action",
+                 "actor_aliases": ["kitten"]},
+                {"event_id": "M2", "text": "waves at the crowd", "kind": "action",
+                 "actor_aliases": ["dragon"]},
+            ],
+        }
+        allocation = [
+            {"event_id": "M1", "clip_index": 0},
+            {"event_id": "M2", "clip_index": 1},
+        ]
+        issue = music_narrative_row_issue(
+            {
+                "source_event_ids": ["M1"],
+                "video_prompt": "The kitten waves at the crowd, then the dragon waves at the crowd.",
+            },
+            contract=contract,
+            allocation=allocation,
+            index=0,
+        )
+        self.assertIsNotNone(issue)
+        self.assertIn("future music narrative event M2", issue)
+
     def test_future_event_in_ending_beat_cannot_appear_before_assignment(self):
         contract = contract_for(
             "The kitten climbs on the dragon, then the dragon soars into the sky."
