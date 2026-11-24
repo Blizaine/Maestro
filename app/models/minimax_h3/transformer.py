@@ -1250,26 +1250,18 @@ class MiniMaxH3AdaLNProjection(nn.Module):
         self.modalities = modalities
         self.apply_silu = apply_silu
         self.linear = nn.Linear(curve_dim, outputs * modalities * hidden_size, bias=True, dtype=dtype)
-        # The compact curve checkpoint stores these projections in FP16, but
-        # Comfy's reference curve path evaluates them in FP32.  Preserve the
-        # compact storage dtype for MMGP and upcast only the tiny projection
-        # while it is active; doing the multiply in FP16 compounds rounding
-        # error coherently through all 50 transformer blocks.
+        # Preserve the checkpoint storage dtype for MMGP. Compact projections
+        # without adapters still use FP32 math, like Comfy's curve path.
         self.linear._lock_dtype = dtype
 
     def forward(self, curve: torch.Tensor, offset: torch.Tensor | None = None) -> tuple[torch.Tensor, ...]:
         if self.apply_silu:
             curve = F.silu(curve)
-        if self.apply_silu:
-            # The full 33B checkpoint has a 2,688-wide timestep embedding.
-            # Upcasting each enormous AdaLN projection to FP32 would create a
-            # roughly 1 GB temporary in every transformer block.  Evaluate
-            # that path in the checkpoint's native BF16/FP16 dtype.  Calling
-            # the module is essential: the full INT8 ConvRot checkpoint
-            # replaces this Linear with QLinearInt8ConvRot, whose forward
-            # rotates the activation before applying its grouped weights.
-            # Bypassing it with F.linear silently corrupts every block's
-            # modulation values and produces colored video/audio noise.
+        if self.apply_silu or getattr(self.linear, "_mm_lora_data", None):
+            # The module forward applies ConvRot and MMGP's low-rank and bias
+            # deltas, including pi-H3's adapter on the compact curve projections.
+            # Use the checkpoint dtype to avoid a large FP32 copy of the full
+            # model's projection and to preserve MMGP's dtype contract.
             projected = self.linear(
                 curve.to(
                     device=curve.device,

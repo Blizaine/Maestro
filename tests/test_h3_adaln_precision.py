@@ -248,6 +248,58 @@ class H3AdaLNPrecisionTests(unittest.TestCase):
             del loaded, stock, final, projected, expected, model
             gc.collect()
 
+    def test_pruned_adaln_applies_low_rank_and_bias_deltas(self):
+        from mmgp import offload
+        from models.minimax_h3.transformer import MiniMaxH3AdaLNProjection
+        from safetensors.torch import save_file
+
+        projection = MiniMaxH3AdaLNProjection(
+            curve_dim=2,
+            hidden_size=2,
+            outputs=2,
+            modalities=1,
+            dtype=torch.float16,
+        ).eval()
+        with torch.no_grad():
+            projection.linear.weight.zero_()
+            projection.linear.bias.zero_()
+
+        manager = offload.offload.__new__(offload.offload)
+        projection._loras_model_data = {}
+        projection._loras_model_shortcuts = {}
+        projection.linear._mm_manager = manager
+        projection.linear.forward = manager.hook_lora(
+            projection.linear, projection, "transformer",
+            projection._loras_model_data, projection._loras_model_shortcuts, "linear",
+        )
+
+        down = torch.tensor([[1.0, -1.0]], dtype=torch.float16)
+        up = torch.tensor([[1.0], [2.0], [-1.0], [0.5]], dtype=torch.float16)
+        bias_delta = torch.tensor([0.25, -0.5, 0.25, 1.0], dtype=torch.float16)
+        curve = torch.tensor([[0.5, -0.25]], dtype=torch.float32)
+        strength = 0.5
+        with tempfile.TemporaryDirectory() as directory:
+            path = str(Path(directory) / "adaln_adapter.safetensors")
+            save_file({
+                "linear.lora_A.weight": down,
+                "linear.lora_B.weight": up,
+                "linear.diff_b": bias_delta,
+            }, path)
+            offload.load_loras_into_model(
+                projection, [path], [strength], pinnedLora=False, verboseLevel=0,
+            )
+            try:
+                self.assertEqual(projection._loras_errors, [])
+                data = projection.linear._mm_lora_data
+                for adapter in projection._loras_active_adapters:
+                    data[adapter + "_GPU"] = data[adapter]
+                with torch.inference_mode():
+                    actual = torch.cat(projection(curve), dim=-1)
+                expected = ((curve.half() @ down.T) @ up.T + bias_delta) * strength
+                torch.testing.assert_close(actual, expected, rtol=0, atol=0, check_dtype=False)
+            finally:
+                offload.unload_loras_from_model(projection)
+
     def test_rank16_lora_rank_passes_through_width8_adaln(self):
         from models.minimax_h3.lora_affine import convert_adaln_loras
 
@@ -259,11 +311,14 @@ class H3AdaLNPrecisionTests(unittest.TestCase):
             f"{prefix}.lora_B.weight": up.clone(),
         }
 
-        count, architecture, source_width, target_width = convert_adaln_loras(
-            "minimax_h3_ref2va",
-            state_dict,
-            torch.empty((1025, 8), dtype=torch.float32),
-        )
+        table = torch.eye(1025, 8)
+        with mock.patch(
+            "models.minimax_h3.lora_affine._load_affine_package",
+            return_value=(table, torch.zeros(9, 2689)),
+        ):
+            count, architecture, source_width, target_width = convert_adaln_loras(
+                "minimax_h3_ref2va", state_dict, table,
+            )
 
         self.assertEqual((count, architecture), (0, "ref2va"))
         self.assertEqual((source_width, target_width), (8, 8))

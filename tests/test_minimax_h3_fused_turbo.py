@@ -465,6 +465,7 @@ class TestFusedH3LoraRuntime(unittest.TestCase):
 
         model = MiniMaxH3Model.__new__(MiniMaxH3Model)
         model._fused_turbo = True
+        model.dwd_steps = None
         model.model_def = {}
         model.omni_reference = False
         model._turbo_lora_active = True
