@@ -123,6 +123,7 @@ class TestH3PTDRefAsymOPD(unittest.TestCase):
         from models.minimax_h3.minimax_h3_main import MiniMaxH3Model
 
         model = object.__new__(MiniMaxH3Model)
+        model.dwd_steps = None
         model.ptd_refasymopd = True
         model.sample_solver = "euler"
         model.transformer = types.SimpleNamespace()

@@ -5671,6 +5671,7 @@ class TestMiniMaxH3RuntimeMath(unittest.TestCase):
             release_special_loras=lambda: None,
             omni_reference=False,
             model_def={},
+            dwd_steps=None,
         )
         MiniMaxH3Model.validate_loras(full, [turbo_path])
         self.assertTrue(full._turbo_lora_active)
@@ -5683,6 +5684,7 @@ class TestMiniMaxH3RuntimeMath(unittest.TestCase):
             release_special_loras=lambda: None,
             omni_reference=False,
             model_def={},
+            dwd_steps=None,
         )
         MiniMaxH3Model.validate_loras(pruned, [turbo_path])
         self.assertTrue(pruned._turbo_lora_active)

@@ -83,7 +83,12 @@ class H3AttentionFallbackTests(unittest.TestCase):
         attention.get_sol_attention_status = lambda: {"reason": "Triton unavailable"}
         attention.get_sla_attention_status = lambda: {"reason": "Triton unavailable"}
         messages = []
-        namespace = {"get_auto_attention": lambda: "sage2", "send_cmd": lambda *args: messages.append(args), "print": lambda *_: None}
+        namespace = {
+            "get_auto_attention": lambda: "sage2",
+            "send_cmd": lambda *args: messages.append(args),
+            "print": lambda *_: None,
+            "sagegp_runtime": SimpleNamespace(MODES=("sagegp_precise", "sagegp_fast", "sagegp_adaptive")),
+        }
         exec(self.code, namespace)
         with patch.dict(sys.modules, {"shared.attention": attention}):
             result = namespace["select"](mode, {"sol_attention": compatible, "sla_attention": compatible}, supported)

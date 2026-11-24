@@ -119,10 +119,17 @@ class TestH3FusedQKVLayout(unittest.TestCase):
     def _stub_adaln_conversion(self):
         affine = types.ModuleType("models.minimax_h3.lora_affine")
 
-        def no_conversion(model_type, state_dict, target_table):
+        def no_conversion(
+            model_type,
+            state_dict,
+            target_table,
+            *,
+            source_package=None,
+        ):
             target_width = 2688 if target_table is None else int(target_table.shape[1])
             return 0, "fl2va", target_width, target_width
 
+        affine.pop_source_package = lambda state_dict: None
         affine.convert_adaln_loras = no_conversion
         return mock.patch.dict(
             sys.modules,

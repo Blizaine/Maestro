@@ -222,13 +222,23 @@ class PikaFlexLoRACompatibilityTests(unittest.TestCase):
             if isinstance(node, ast.FunctionDef)
             and node.name in {"validate_loras", "configure_special_loras"}
         }
-        namespace = {"__package__": "models.minimax_h3"}
+        from models.minimax_h3.pi_h3 import (
+            pi_h3_adapter_steps,
+            pi_h3_dwd_adapter_steps,
+        )
+
+        namespace = {
+            "__package__": "models.minimax_h3",
+            "pi_h3_adapter_steps": pi_h3_adapter_steps,
+            "pi_h3_dwd_adapter_steps": pi_h3_dwd_adapter_steps,
+        }
         for method in methods.values():
             exec(compile(ast.Module(body=[method], type_ignores=[]), str(main_path), "exec"), namespace)
 
         class ModelStub:
             pika_flex = True
             omni_reference = False
+            dwd_steps = None
             _turbo_lora_active = True
             _turbo_lora_paths = ("stale-turbo.safetensors",)
             _pdd_lora_active = True

@@ -86,7 +86,7 @@ class H3ExtendedDurationTests(unittest.TestCase):
                      "MINIMAX_H3_MIN_DURATION": 5, "MINIMAX_H3_MAX_DURATION": 15,
                      "math": math, "align_num_frames": align_num_frames}
         exec(compile(ast.Module(body=[generate], type_ignores=[]), "h3-generate.py", "exec"), namespace)
-        model = SimpleNamespace(audio_only=False, viggle=False, remake_mode=None,
+        model = SimpleNamespace(audio_only=False, viggle=False, remake_mode=None, dwd_steps=None,
                                 regenerate_ic=False,
                                 ptd_refasymopd=False,
                                 sample_solver="euler", _pdd_lora_active=False)

@@ -246,6 +246,7 @@ class TestH3TwoPassHelpers(unittest.TestCase):
         model = object.__new__(MiniMaxH3Model)
         model.sample_solver = "euler"
         model.model_def = {}
+        model.dwd_steps = 0
         model._turbo_lora_active = True
         model._pdd_lora_active = False
         model.ptd_refasymopd = False
@@ -346,6 +347,7 @@ class TestH3TwoPassHelpers(unittest.TestCase):
         from models.minimax_h3.minimax_h3_main import MiniMaxH3Model
 
         model = object.__new__(MiniMaxH3Model)
+        model.dwd_steps = 0
         model._turbo_lora_active = True
         model._turbo_lora_paths = []
         model._pdd_lora_active = False

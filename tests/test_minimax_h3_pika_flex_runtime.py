@@ -26,6 +26,11 @@ class PikaFlexRuntimeTests(unittest.TestCase):
             raise unittest.SkipTest("Pika H3 Flex runtime tests require PyTorch") from error
 
         cls.torch = torch
+        from models.minimax_h3.pi_h3 import (
+            pi_h3_adapter_steps,
+            pi_h3_dwd_adapter_steps,
+        )
+
         main_path = APP / "models" / "minimax_h3" / "minimax_h3_main.py"
         tree = ast.parse(main_path.read_text(encoding="utf-8"))
         names = {
@@ -54,6 +59,8 @@ class PikaFlexRuntimeTests(unittest.TestCase):
             "torch": torch,
             "MINIMAX_H3_FPS": 24,
             "MINIMAX_H3_AUDIO_CHANNELS": 2,
+            "pi_h3_adapter_steps": pi_h3_adapter_steps,
+            "pi_h3_dwd_adapter_steps": pi_h3_dwd_adapter_steps,
         }
         cls.generate_ast = model_methods["generate"]
         for name, node in {**selected, **model_methods}.items():
@@ -104,6 +111,7 @@ class PikaFlexRuntimeTests(unittest.TestCase):
         model = self.MiniMaxH3Model.__new__(self.MiniMaxH3Model)
         model.pika_flex = True
         model.omni_reference = reference
+        model.dwd_steps = None
         model._turbo_lora_active = True
         model._turbo_lora_paths = ("stale-turbo.safetensors",)
         model._pdd_lora_active = True

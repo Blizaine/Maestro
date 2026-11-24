@@ -235,6 +235,7 @@ class H3LoraCompatibilityTests(unittest.TestCase):
         from models.minimax_h3.minimax_h3_main import MiniMaxH3Model
 
         model = object.__new__(MiniMaxH3Model)
+        model.dwd_steps = None
         model.model_def = {"architecture": "minimax_h3_ref2va"}
         model.release_special_loras = lambda: None
         with self.assertRaisesRegex(ValueError, "dedicated MiniMax H3 VDN model"):
@@ -405,6 +406,7 @@ class H3LoraCompatibilityTests(unittest.TestCase):
         from models.minimax_h3.minimax_h3_main import MiniMaxH3Model
 
         model = object.__new__(MiniMaxH3Model)
+        model.dwd_steps = None
         model.model_def = {"architecture": "minimax_h3", "minimax_h3_fasth3": True}
         model.fasth3 = True
         model.fasth3_omniref = False

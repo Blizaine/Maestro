@@ -14,6 +14,7 @@ from unittest.mock import Mock, patch
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "app"))
 
+from models.minimax_h3.pi_h3 import pi_h3_adapter_steps, pi_h3_dwd_adapter_steps
 from services import director_pipeline as pipeline
 
 
@@ -134,6 +135,7 @@ class SingularityIntegrationTests(unittest.TestCase):
         validate = production_function(
             ROOT / "app/models/minimax_h3/minimax_h3_main.py", "validate_loras",
             {"os": os, "validate_minimax_h3_loras": validate_minimax_h3_loras,
+             "pi_h3_adapter_steps": pi_h3_adapter_steps, "pi_h3_dwd_adapter_steps": pi_h3_dwd_adapter_steps,
              **{name: getattr(turbo, name) for name in (
                 "find_minimax_h3_accelerators", "find_minimax_h3_turbo_loras",
                 "find_minimax_h3_pdd_loras", "minimax_h3_turbo_preset_for_path",
@@ -141,14 +143,14 @@ class SingularityIntegrationTests(unittest.TestCase):
         )
         for model in MODELS:
             definition = model_definition(model)
-            stub = SimpleNamespace(model_def=definition, fasth3=False,
+            stub = SimpleNamespace(model_def=definition, fasth3=False, dwd_steps=None,
                                    omni_reference=bool(definition.get("omni_reference")),
                                    release_special_loras=lambda: None)
             validate(stub, [FILENAME])
             self.assertTrue(stub._turbo_lora_active)
             with self.assertRaisesRegex(ValueError, "one accelerator"):
                 validate(stub, [FILENAME, "MiniMax-H3-Ref2VA-Acc-8Step.safetensors"])
-        stock_frames = SimpleNamespace(model_def={}, omni_reference=False,
+        stock_frames = SimpleNamespace(model_def={}, omni_reference=False, dwd_steps=None,
                                        release_special_loras=lambda: None)
         with self.assertRaisesRegex(ValueError, "REF2VA"):
             validate(stock_frames, [FILENAME])
@@ -179,6 +181,7 @@ class SingularityIntegrationTests(unittest.TestCase):
             validate = production_function(
                 ROOT / "app/models/minimax_h3/minimax_h3_main.py", "validate_loras",
                 {"os": __import__("os"), "validate_minimax_h3_loras": validate_minimax_h3_loras,
+                 "pi_h3_adapter_steps": pi_h3_adapter_steps, "pi_h3_dwd_adapter_steps": pi_h3_dwd_adapter_steps,
                  **{name: getattr(turbo, name) for name in (
                     "find_minimax_h3_accelerators", "find_minimax_h3_turbo_loras",
                     "find_minimax_h3_pdd_loras", "minimax_h3_turbo_preset_for_path",
@@ -186,7 +189,7 @@ class SingularityIntegrationTests(unittest.TestCase):
             )
             model = SimpleNamespace(
                 model_def={"omni_reference": True}, omni_reference=True,
-                ptd_refasymopd=True, fasth3=False, _fused_turbo=False,
+                ptd_refasymopd=True, fasth3=False, _fused_turbo=False, dwd_steps=None,
                 _baked_turbo=False, release_special_loras=lambda: None,
             )
             validate(model, hop_paths)
