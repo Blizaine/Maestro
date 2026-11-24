@@ -37,25 +37,31 @@ Runtime upgrades are explicit menu actions. A missing performance-runtime marker
 does not automatically run Update when you open the launcher. If offered,
 **Start with Compatibility Runtime** keeps the existing runtime available.
 
-### v4.2.0 (2026-11-22) — Dev testing
+### v4.2.0 (2026-11-23)
 
-- **Studio Recipes** now show short playable previews and carry model, media
-  and prompt guidance into Studio and MCP.
-- **Remake** now sends up to four extracted frames to Studio Image for editing
-  and returns each edit to its original slot. Experimental BFS Aligned Swap
-  replaces a person while preserving the source soundtrack.
-- **Director** preserves dialogue speakers through H3 prompt enhancement,
-  validates all reference windows before rendering, and recovers music-video
-  planning from saved progress. The new Sung by workflow can change a song's
-  singer while keeping its backing track and timing.
-- **New model options** include MiniMax H3 Image pDMD 2- and 4-step presets,
-  H3 HyperFlow Flash in Frames and References, LongCat Avatar 1.6, and ZONOS3
-  Mini for multilingual speech and voice cloning.
-- **Studio and runtime fixes** improve audio-driven duration, per-pass timing,
-  H3 Face Refiner, automatic VRAM tuning, sliding-window video assembly,
-  FlashVSR caching and Wan 2.2 defaults.
+- **Generate H3 video in 2 or 4 steps** with pi-H3 Frames recipes and dedicated
+  DWD models that decode the picture in the last denoising pass. Experimental
+  H3 HyperFlow Flash 14B adds another low-step option for Frames and References.
+- **Preview Studio Recipes before using them.** Play short examples and load a
+  recipe's model settings and prompt guidance. MCP clients can read the same
+  recipe guidance.
+- **Edit keyframes and keep the original soundtrack.** Remake can round-trip
+  up to four frames through Studio Image. Experimental BFS Aligned Swap replaces
+  a person using a single identity image. References can keep source audio in
+  the finished clip without using it to drive the video model.
+- **Change the singer and finish the music video.** Director can convert a lead
+  voice or duet parts while keeping the accompaniment and timing. Export timed
+  lyrics as SRT and queue upscaling for individual takes or the joined cut.
+- **More local generation options.** Try 2- and 4-step MiniMax H3 Image
+  presets. Experimental models add 25 fps avatars with LongCat Avatar 1.6
+  and multilingual voice cloning with ZONOS3 Mini.
+- **More reliable long renders.** Director preserves named speakers through
+  prompt enhancement and validates each H3 reference window before rendering.
+  Music-video planning resumes from accepted work. Extreme attention chunking,
+  optional SageGP and incremental video assembly expand the runtime options.
 
-Maestro v4.2.0 is available on **Dev**. See the [detailed changes](CHANGELOG.md#420--2026-11-22).
+Maestro v4.2.0 is available on **Main and Dev**. See the
+[release notes](docs/RELEASE_NOTES_V4.2.0.md) and [detailed changes](CHANGELOG.md#420--2026-11-23).
 
 ### v4.1.1 (2026-11-10)
 

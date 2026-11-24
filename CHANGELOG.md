@@ -3,9 +3,9 @@
 All notable changes to Maestro are documented here. The upstream WanGP
 pipeline's own history lives in [app/docs/CHANGELOG.md](app/docs/CHANGELOG.md).
 
-## [4.2.0] — 2026-11-22
+## [4.2.0] — 2026-11-23
 
-Public Dev testing release.
+Public Main and Dev release. See the [v4.2.0 release notes](docs/RELEASE_NOTES_V4.2.0.md).
 
 ### Director and creative workflows
 
@@ -18,12 +18,19 @@ Public Dev testing release.
   cast and recover completed clips during assembly.
 - Audition a new singing voice in Director with **Sung by**. SeedVC can convert
   lead vocals or duet parts while retaining the accompaniment and song timing.
+- In Director Delivery, export timed song lyrics as an SRT caption track and
+  queue upscaling for a selected shot or an already joined cut.
+- Anchor the start or end of a supported Director shot to a neighboring take.
+  Dependent shots are marked for regeneration when their source take changes.
 - Preview Recipes with short, muted video samples and apply them with their
   required model, media and prompt guidance. MCP clients can read recipe
   guidance too.
 - Extract and edit up to four Remake keyframes in Studio Image and return them to
   their original slots. Experimental BFS Aligned Swap uses one identity image
   with the original clip's framing and soundtrack.
+- **Keep source audio (output only)** in Studio References copies the selected
+  reference soundtrack into the finished clip without passing it to H3 as
+  driving audio. Remember the choice when reusing the clip's settings.
 
 ### Models and acceleration
 
@@ -31,8 +38,13 @@ Public Dev testing release.
   editing, alongside the native 6-step reset preset.
 - Add experimental H3 HyperFlow Flash 14B for Frames and References with 4, 6 and
   8 Euler steps and optional two-pass generation.
-- Add LongCat Avatar 1.6 Distilled with 25 fps output, an 8-step scheduler and
-  streamed audio conditioning.
+- Add the WanGP v20.10 pi-H3 FL2VA 2- and 4-step Frames recipes, plus dedicated
+  Pruned and Full DWD models that produce pixels in the final denoising pass.
+  The DWD variants load their matching accelerator LoRAs automatically.
+  Apply low-rank and bias changes in Pruned timestep layers, and match the
+  published audio/video schedule, seeded noise and audio tail.
+- Add experimental LongCat Avatar 1.6 Distilled with 25 fps output, an 8-step
+  scheduler and streamed audio conditioning.
 - Add experimental ZONOS3 Mini speech with support for 43 languages, 27 built-in
   voices, reference voice cloning and delivery controls.
 
@@ -44,6 +56,9 @@ Public Dev testing release.
   comparison.
 - Select H3 attention head splitting from available VRAM in Auto mode and reduce
   peak VAE conversion memory. Independently configure manual splitting.
+- Add Extreme attention input chunking for supported model paths and optional
+  SageGP Precise, Fast and Adaptive attention. Availability depends on the GPU
+  and installed kernels. Extreme chunking trades some speed for lower peak VRAM.
 - Assemble supported native sliding-window MP4s incrementally, preserving audio
   and frame timing. Window assembly is scoped to the active job.
 - Pin optional WGPKernels 1.5.0, correct Wan 2.2 guidance defaults and respect
