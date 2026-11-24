@@ -16,6 +16,7 @@ PI_H3_REVISIONS = {
 PI_H3_SIGMA_COUNTS = (2, 4)
 PI_H3_RAW_MAX_TIME = {2: 0.93, 4: 0.96}
 PI_H3_FINAL_STEP_SCALE = 0.6
+PI_H3_AUDIO_TAIL_LATENTS = 5
 
 
 def pi_h3_sigmas(steps: int, shift: float = 12.0) -> list[float]:

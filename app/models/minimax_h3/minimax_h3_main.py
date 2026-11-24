@@ -107,6 +107,7 @@ from .turbo import (
     minimax_h3_turbo_preset_for_path,
 )
 from .pi_h3 import (
+    PI_H3_AUDIO_TAIL_LATENTS,
     _map_pi_h3_audio_sigmas,
     _scale_pi_h3_initial_noise,
     pi_h3_adapter_steps,
@@ -3537,13 +3538,18 @@ class MiniMaxH3Model:
             visual_conditions.append(aligned_guide_condition)
 
         request_seed = int(torch.seed() if seed is None else seed)
-        generator = torch.Generator(device=self.device).manual_seed(
+        # Match WanGP's pi-H3 noise stream so a seed selects the same noise on CUDA.
+        generator = torch.Generator(device="cpu" if pi_steps else self.device).manual_seed(
             request_seed + 7919 if self.pika_flex else request_seed
         )
         num_latent_frames = video_latent_num_frames(target_frame_num)
         latent_height = height // self.vae.spatial_compression_ratio
         latent_width = width // self.vae.spatial_compression_ratio
         num_audio_latents = audio_latent_num_frames(target_frame_num)
+        if pi_steps:
+            # The released recipe denoises five extra audio latents. Decoding
+            # below trims the waveform to the requested video duration.
+            num_audio_latents += PI_H3_AUDIO_TAIL_LATENTS
 
         target_video_condition_rows = None
         target_video_condition_frames = 0
