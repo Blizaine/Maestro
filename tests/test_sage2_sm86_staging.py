@@ -101,7 +101,7 @@ def _load_sage2_core():
 
     with (
         mock.patch.dict(sys.modules, fake_modules),
-        mock.patch("importlib.metadata.version", return_value="2.2.0"),
+        mock.patch("shared.sagegp_runtime.sageattention_version", return_value="2.2.0"),
         mock.patch.object(torch.cuda, "device_count", return_value=0),
     ):
         spec = importlib.util.spec_from_file_location(
