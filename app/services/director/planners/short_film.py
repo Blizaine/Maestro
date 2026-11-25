@@ -9978,6 +9978,12 @@ SCREENPLAY:
                     "with validator feedback."
                 )
 
+        # LOCAL PATCH: like music-video source compilation, fall back to a
+        # deterministic, story-ordered event allocation before aborting. The
+        # unchanged validators still decide; physical-state issues still fail.
+        fallback_rows, fallback_issues = _source_allocation_fallback(rows, source_contract)
+        if not fallback_issues:
+            return fallback_rows, request_budget
         raise RuntimeError(
             "MiniMax H3 could not repair the source/physical contract: "
             + "; ".join(patch_issues)
@@ -11101,6 +11107,11 @@ description with the locked dialogue in video_prompt."""
                 shot_dicts, source_contract, require_ids=True,
             )
             semantic_issues.extend(validate_physical_state_sequence(shot_dicts))
+        if semantic_issues and source_contract_active:
+            # LOCAL PATCH: deterministic allocation fallback (see above).
+            fallback_rows, fallback_issues = _source_allocation_fallback(shot_dicts, source_contract)
+            if not fallback_issues:
+                shot_dicts, semantic_issues = fallback_rows, []
         if semantic_issues:
             raise RuntimeError("H3 story/physical plan did not validate after its bounded repair: "
                                + "; ".join(semantic_issues) + ". No video jobs were queued.")
@@ -11446,3 +11457,28 @@ Go:"""
         title = shot_dicts[0].get("title") if shot_dicts else None
         self._last_title = title
         return shots, title
+
+
+def _source_allocation_fallback(rows, source_contract):
+    """LOCAL PATCH: deterministic source-event ownership after LLM repairs fail.
+
+    Returns (rows, remaining_issues). Rows are only used when no issue remains
+    under the same validators the planner already applies.
+    """
+    from ..source_allocation_fallback import reallocate_source_events
+
+    try:
+        candidate = reallocate_source_events(rows, source_contract)
+    except Exception as error:  # never mask the original planner error
+        print(f"[ShortFilmPlanner] Source allocation fallback failed: {error}")
+        return rows, ["fallback error"]
+    issues = source_contract_issues(candidate, source_contract, require_ids=True)
+    issues.extend(validate_physical_state_sequence(candidate))
+    if issues:
+        print("[ShortFilmPlanner] Deterministic source allocation fallback still invalid: "
+              + "; ".join(issues[:6]))
+    else:
+        print("[ShortFilmPlanner] LLM source/physical repairs failed; deterministic "
+              "story-ordered source allocation validated with the unchanged checks: "
+              + ", ".join(f"shot {i + 1}={row.get('source_event_ids')}" for i, row in enumerate(candidate)))
+    return candidate, issues

@@ -302,7 +302,28 @@ class NativeContractPatchTests(unittest.TestCase):
                 self.assertEqual(repaired[0].camera_plan.movement, "static")
                 self.assertEqual(rows, original)
 
+        # LOCAL PATCH: exhausted LLM repairs now fall back to a deterministic,
+        # story-ordered allocation that the unchanged validators must accept.
         with patch.object(planner, "_call_llm_json", side_effect=[copy.deepcopy(rows), bad_state, bad_state]) as exhausted:
+            fallback_shots, _ = planner._plan_story_h3_native(
+                story_description="A silent short film. A courier opens the box. The courier closes the box. No speech or music.",
+                screenplay="A courier opens, then closes a box.",
+                reference_image_path=None, char_profiles=[], has_reference=False,
+                target_duration=20, fps=24, frames_steps=17, frames_minimum=124,
+                frames_maximum=345, require_source_contract=True,
+            )
+        self.assertEqual(exhausted.call_count, 3)
+        self.assertEqual(len(fallback_shots), 2)
+        self.assertEqual(
+            [list(shot.metadata.get("source_event_ids") or []) for shot in fallback_shots],
+            [["E1"], ["E2"]],
+        )
+
+        # Physical-state failures are not ownership problems: still abort.
+        broken = copy.deepcopy(rows)
+        broken[0]["physical_state"] = {"opening": [{"subject_id": "char_0", "predicate": "grounded", "value": "flying"}],
+                                       "transitions": [], "closing": []}
+        with patch.object(planner, "_call_llm_json", side_effect=[broken, bad_state, bad_state]):
             with self.assertRaisesRegex(RuntimeError, "No video jobs were queued"):
                 planner._plan_story_h3_native(
                     story_description="A silent short film. A courier opens the box. The courier closes the box. No speech or music.",
@@ -311,7 +332,6 @@ class NativeContractPatchTests(unittest.TestCase):
                     target_duration=20, fps=24, frames_steps=17, frames_minimum=124,
                     frames_maximum=345, require_source_contract=True,
                 )
-        self.assertEqual(exhausted.call_count, 3)
 
 if __name__ == "__main__":
     unittest.main()
