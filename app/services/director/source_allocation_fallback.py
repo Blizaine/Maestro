@@ -147,6 +147,12 @@ _NAMED_CUE_RE = re.compile(
 )
 _OPENING_OMITS_RE = re.compile(r"^shot (\d+) opening physical_state omits carried fact '(.+) (\w+)'$", re.I)
 _CLOSING_OMITS_RE = re.compile(r"^shot (\d+) closing physical_state omits (.+) (\w+)$", re.I)
+_TRANSITION_NO_OPENING_RE = re.compile(
+    r"^shot (\d+) transition (\d+) for '(.+) (\w+)' has no opening/current fact to transition from$", re.I,
+)
+_TRANSITION_STARTS_AT_RE = re.compile(
+    r"^shot (\d+) transition (\d+) for '(.+) (\w+)' starts at '(.*)', but the current state is '(.*)'$", re.I,
+)
 _CLOSING_INTRODUCES_RE = re.compile(
     r"^shot (\d+) closing introduces (.+) (\w+) without an opening fact or transition$", re.I,
 )
@@ -249,6 +255,27 @@ def reconcile_physical_ledger(rows: list[dict], issues: list[str], events_by_sho
             if value is not None and _find(state["closing"], subject, predicate) is None:
                 state["closing"].append({"subject_id": subject, "predicate": predicate, "value": value})
                 changed = True
+        elif m := _TRANSITION_NO_OPENING_RE.match(text):
+            index, number, subject, predicate = int(m.group(1)) - 1, int(m.group(2)) - 1, m.group(3), m.group(4)
+            if not 0 <= index < len(rows):
+                continue
+            state = _state(rows[index])
+            if not 0 <= number < len(state["transitions"]):
+                continue
+            transition = state["transitions"][number]
+            start = transition.get("from_value") if isinstance(transition, dict) else None
+            if start is not None and _find(state["opening"], subject, predicate) is None:
+                state["opening"].append({"subject_id": transition.get("subject_id", subject),
+                                         "predicate": predicate, "value": start})
+                changed = True
+        elif m := _TRANSITION_STARTS_AT_RE.match(text):
+            index, number, current = int(m.group(1)) - 1, int(m.group(2)) - 1, m.group(6)
+            if not 0 <= index < len(rows):
+                continue
+            state = _state(rows[index])
+            if 0 <= number < len(state["transitions"]) and isinstance(state["transitions"][number], dict):
+                state["transitions"][number]["from_value"] = current
+                changed = True
         elif m := _CLOSING_INTRODUCES_RE.match(text):
             index, subject, predicate = int(m.group(1)) - 1, m.group(2), m.group(3)
             if not 0 <= index < len(rows):
@@ -299,7 +326,7 @@ def reallocate_source_events(rows: list[dict], contract: dict) -> list[dict]:
     from .physical_continuity import validate_physical_state_sequence
     from .source_contract import source_contract_issues
 
-    for _ in range(4):
+    for _ in range(6):
         remaining = source_contract_issues(rows, contract, require_ids=True)
         remaining.extend(validate_physical_state_sequence(rows))
         if not remaining or not reconcile_physical_ledger(rows, remaining, assigned):
