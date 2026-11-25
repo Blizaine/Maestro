@@ -1182,6 +1182,28 @@ def _h3_screenplay_speaker_heading(value: Any) -> tuple[str, bool] | None:
     return (_normalize_h3_text(name), False) if name else None
 
 
+
+_H3_GRAPHIC_SPEAKER_RE = re.compile(
+    r"(?:opening\s+|closing\s+|end\s+|title\s+|intro\s+|outro\s+)?"
+    r"(?:title|end|intro|outro|lower[\s-]*third|caption|subtitle|super|graphic|"
+    r"on[\s-]*screen\s+text|text\s+overlay|card)s?(?:\s+cards?)?",
+    re.IGNORECASE,
+)
+_H3_GRAPHIC_FIELDS_RE = re.compile(
+    r"(?:\*\*\s*)?\b(?:text|subtitle|title|role|caption|font|style|logo)\s*:\s*(?:\*\*)?",
+    re.IGNORECASE,
+)
+
+
+def _is_h3_onscreen_graphic_turn(speaker_name: Any, raw_text: str) -> bool:
+    """LOCAL PATCH: True for title/end-card or caption blocks parsed as a speaker."""
+
+    name = str(speaker_name or "").strip(" *_:-").strip()
+    if name and _H3_GRAPHIC_SPEAKER_RE.fullmatch(name):
+        return True
+    fields = _H3_GRAPHIC_FIELDS_RE.findall(str(raw_text or ""))
+    return len(fields) >= 2 and "**" in str(raw_text or "")
+
 def _extract_h3_screenplay_dialogue(screenplay: Any) -> list[dict[str, str]]:
     """Extract the immutable speaker/word stream from Pass 1 screenplay text.
 
@@ -1233,6 +1255,12 @@ def _extract_h3_screenplay_dialogue(screenplay: Any) -> list[dict[str, str]]:
             spoken_lines.append(dialogue)
             index += 1
         spoken = _h3_plain_dialogue_text(" ".join(spoken_lines))
+        if spoken and _is_h3_onscreen_graphic_turn(speaker_name, " ".join(spoken_lines)):
+            # LOCAL PATCH: a screenplay "TITLE CARD"/"END CARD" block with
+            # Markdown fields (**text:**, **subtitle:**) is on-screen graphics,
+            # not speech; H3 voiced "text Trishanku subtitle ..." otherwise.
+            print(f"[ShortFilmPlanner] Ignored on-screen graphic block {speaker_name!r} as dialogue.")
+            continue
         if spoken:
             manifest.append({
                 "speaker_name": speaker_name,
