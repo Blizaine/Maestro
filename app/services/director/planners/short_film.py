@@ -1204,6 +1204,21 @@ def _is_h3_onscreen_graphic_turn(speaker_name: Any, raw_text: str) -> bool:
     fields = _H3_GRAPHIC_FIELDS_RE.findall(str(raw_text or ""))
     return len(fields) >= 2 and "**" in str(raw_text or "")
 
+
+_H3_SCENE_HEADING_TEXT_RE = re.compile(
+    r"[*_#\s]*(?:INT|EXT|INT\s*/\s*EXT|I\s*/\s*E|EST)\.?\s+[^\n]{1,120}?"
+    r"(?:\s+-\s+(?:DAY|NIGHT|MORNING|EVENING|DAWN|DUSK|CONTINUOUS|LATER|SAME))?[*_\s.]*",
+)
+
+
+def _is_h3_scene_heading_turn(raw_text: str) -> bool:
+    """LOCAL PATCH: True when the whole 'spoken' text is a screenplay slugline."""
+
+    text = str(raw_text or "").strip()
+    return bool(text) and bool(re.match(r"[*_#\s]*(?:INT|EXT|I/E|EST)\b", text)) and bool(
+        _H3_SCENE_HEADING_TEXT_RE.fullmatch(text)
+    )
+
 def _extract_h3_screenplay_dialogue(screenplay: Any) -> list[dict[str, str]]:
     """Extract the immutable speaker/word stream from Pass 1 screenplay text.
 
@@ -1255,6 +1270,11 @@ def _extract_h3_screenplay_dialogue(screenplay: Any) -> list[dict[str, str]]:
             spoken_lines.append(dialogue)
             index += 1
         spoken = _h3_plain_dialogue_text(" ".join(spoken_lines))
+        if spoken and _is_h3_scene_heading_turn(" ".join(spoken_lines)):
+            # LOCAL PATCH: "**INT. NEWS DESK - DAY**" under a speaker heading is a
+            # (Markdown-bolded) slugline, not speech.
+            print(f"[ShortFilmPlanner] Ignored scene heading under {speaker_name!r} as dialogue.")
+            continue
         if spoken and _is_h3_onscreen_graphic_turn(speaker_name, " ".join(spoken_lines)):
             # LOCAL PATCH: a screenplay "TITLE CARD"/"END CARD" block with
             # Markdown fields (**text:**, **subtitle:**) is on-screen graphics,
