@@ -1196,7 +1196,7 @@ _H3_GRAPHIC_FIELDS_RE = re.compile(
 
 
 def _is_h3_onscreen_graphic_turn(speaker_name: Any, raw_text: str) -> bool:
-    """LOCAL PATCH: True for title/end-card or caption blocks parsed as a speaker."""
+    """True for title/end-card or caption blocks parsed as a speaker."""
 
     name = str(speaker_name or "").strip(" *_:-").strip()
     if name and _H3_GRAPHIC_SPEAKER_RE.fullmatch(name):
@@ -1212,7 +1212,7 @@ _H3_SCENE_HEADING_TEXT_RE = re.compile(
 
 
 def _is_h3_scene_heading_turn(raw_text: str) -> bool:
-    """LOCAL PATCH: True when the whole 'spoken' text is a screenplay slugline."""
+    """True when the whole 'spoken' text is a screenplay slugline."""
 
     text = str(raw_text or "").strip()
     return bool(text) and bool(re.match(r"[*_#\s]*(?:INT|EXT|I/E|EST)\b", text)) and bool(
@@ -1271,14 +1271,14 @@ def _extract_h3_screenplay_dialogue(screenplay: Any) -> list[dict[str, str]]:
             index += 1
         spoken = _h3_plain_dialogue_text(" ".join(spoken_lines))
         if spoken and _is_h3_scene_heading_turn(" ".join(spoken_lines)):
-            # LOCAL PATCH: "**INT. NEWS DESK - DAY**" under a speaker heading is a
+            # "**INT. NEWS DESK - DAY**" under a speaker heading is a
             # (Markdown-bolded) slugline, not speech.
             print(f"[ShortFilmPlanner] Ignored scene heading under {speaker_name!r} as dialogue.")
             continue
         if spoken and _is_h3_onscreen_graphic_turn(speaker_name, " ".join(spoken_lines)):
-            # LOCAL PATCH: a screenplay "TITLE CARD"/"END CARD" block with
+            # a screenplay "TITLE CARD"/"END CARD" block with
             # Markdown fields (**text:**, **subtitle:**) is on-screen graphics,
-            # not speech; H3 voiced "text Trishanku subtitle ..." otherwise.
+            # not speech; H3 voiced "text <title> subtitle ..." otherwise.
             print(f"[ShortFilmPlanner] Ignored on-screen graphic block {speaker_name!r} as dialogue.")
             continue
         if spoken:
@@ -10026,7 +10026,7 @@ SCREENPLAY:
                     "with validator feedback."
                 )
 
-        # LOCAL PATCH: like music-video source compilation, fall back to a
+        # like music-video source compilation, fall back to a
         # deterministic, story-ordered event allocation before aborting. The
         # unchanged validators still decide; physical-state issues still fail.
         fallback_rows, fallback_issues = _source_allocation_fallback(rows, source_contract)
@@ -11156,7 +11156,7 @@ description with the locked dialogue in video_prompt."""
             )
             semantic_issues.extend(validate_physical_state_sequence(shot_dicts))
         if semantic_issues and source_contract_active:
-            # LOCAL PATCH: deterministic allocation fallback (see above).
+            # deterministic allocation fallback (see above).
             fallback_rows, fallback_issues = _source_allocation_fallback(shot_dicts, source_contract)
             if not fallback_issues:
                 shot_dicts, semantic_issues = fallback_rows, []
@@ -11508,7 +11508,7 @@ Go:"""
 
 
 def _source_allocation_fallback(rows, source_contract):
-    """LOCAL PATCH: deterministic source-event ownership after LLM repairs fail.
+    """deterministic source-event ownership after LLM repairs fail.
 
     Returns (rows, remaining_issues). Rows are only used when no issue remains
     under the same validators the planner already applies.

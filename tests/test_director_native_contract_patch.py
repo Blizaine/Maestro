@@ -302,7 +302,7 @@ class NativeContractPatchTests(unittest.TestCase):
                 self.assertEqual(repaired[0].camera_plan.movement, "static")
                 self.assertEqual(rows, original)
 
-        # LOCAL PATCH: exhausted LLM repairs now fall back to a deterministic,
+        # exhausted LLM repairs now fall back to a deterministic,
         # story-ordered allocation that the unchanged validators must accept.
         with patch.object(planner, "_call_llm_json", side_effect=[copy.deepcopy(rows), bad_state, bad_state]) as exhausted:
             fallback_shots, _ = planner._plan_story_h3_native(

@@ -278,7 +278,7 @@ class DirectorStoryContractRecoveryTests(unittest.TestCase):
         rows = _three_shots()
         issues = ["Source actions must be allocated exactly once in source order"]
 
-        # LOCAL PATCH: after two invalid LLM patches the deterministic fallback
+        # after two invalid LLM patches the deterministic fallback
         # owns the result; it must match what a valid repair produces.
         repaired, _ = planner._repair_h3_source_physical_plan(
             rows,

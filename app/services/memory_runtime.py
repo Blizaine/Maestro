@@ -244,7 +244,7 @@ def _selection_for_backend(app_dir: str | os.PathLike[str], backend: str) -> Run
 
 def _same_path(left: str | os.PathLike[str], right: Path) -> bool:
     try:
-        # LOCAL PATCH: profile folders reach the shared install through symlinks,
+        # profile folders reach the shared install through symlinks,
         # so compare the real files rather than the spelled paths.
         return os.path.normcase(os.path.realpath(os.fspath(left))) == os.path.normcase(
             os.path.realpath(os.fspath(right))

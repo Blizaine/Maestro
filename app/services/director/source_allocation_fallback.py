@@ -1,6 +1,6 @@
 """Deterministic source-event allocation after bounded LLM repairs fail.
 
-LOCAL PATCH (short-film story mode). Music-video planning already compiles a
+Short-film story mode. Music-video planning already compiles a
 clip from its assigned source actions when writer repairs fail; short-film
 story planning instead aborted the whole production when a small writer model
 left source_event_ids out of order, duplicated, or invented (e.g. E7/E8 for a

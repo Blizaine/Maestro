@@ -88,7 +88,7 @@ _GLOBAL_CAST_RULE_RE = re.compile(
 def _is_production_metadata(text: str) -> bool:
     """Exclude format, soundtrack and global casting notes from action IDs.
 
-    LOCAL PATCH (news-Short briefs): "A 24-second vertical space-news Short
+    News-Short briefs: "A 24-second vertical space-news Short
     for the channel X", "Rocket roar, station hum and light upbeat music" and
     "The alien is the only speaker" were each allocated an immutable event that
     no shot can visibly perform, so every planner failed the exactly-once check.
