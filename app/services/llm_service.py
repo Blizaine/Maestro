@@ -814,6 +814,20 @@ def _openai_structured_response_format(json_schema: Optional[dict]) -> Optional[
     }
 
 
+def _remote_is_loopback_llamacpp() -> bool:
+    """LOCAL PATCH (Maestro trial on this PC): a "remote" endpoint on 127.0.0.1/localhost is the
+    user's own llama.cpp server behind llama-swap (Bonsai). Treat it like Maestro's built-in
+    llama-server: keep llama.cpp fields (chat_template_kwargs/enable_thinking) and send native
+    JSON-schema grammar, instead of the stripped OpenAI-gateway form."""
+    if _provider != "remote":
+        return False
+    try:
+        host = (urlparse(str(_remote_url or "")).hostname or "").lower()
+    except (TypeError, ValueError):
+        return False
+    return host in ("127.0.0.1", "localhost", "::1")
+
+
 def _finalize_payload(payload: dict) -> dict:
     """Translate Maestro's llama.cpp request into OpenAI-compatible form.
 
@@ -825,6 +839,10 @@ def _finalize_payload(payload: dict) -> dict:
 
     if _provider not in ("remote", "openai"):
         return record_payload(payload, model_id=_model_id, command=getattr(_process, "args", None))
+    if _remote_is_loopback_llamacpp():   # LOCAL PATCH: llama-swap needs "model"; keep llama.cpp fields
+        prepared = dict(payload)
+        prepared["model"] = _model_id
+        return record_payload(prepared, model_id=_model_id)
     try:
         endpoint_host = (urlparse(str(_remote_url or "")).hostname or "").lower()
     except (TypeError, ValueError):
@@ -2774,7 +2792,7 @@ def generate(
     # Use llama.cpp's native grammar form locally. Remote OpenAI-compatible
     # endpoints receive strict JSON Schema only for explicit opt-in callers.
     if json_schema is not None:
-        if _provider == "local":
+        if _provider == "local" or _remote_is_loopback_llamacpp():   # LOCAL PATCH: native grammar for local llama-swap
             payload["response_format"] = {"type": "json_object", "schema": json_schema}
         elif _provider in ("remote", "openai") and remote_json_schema:
             response_format = _openai_structured_response_format(json_schema)
@@ -3005,7 +3023,7 @@ def generate_streaming(
     # remote OpenAI-compatible endpoints receive strict JSON Schema only for
     # compatible object-root schemas (see generate() above).
     if json_schema is not None:
-        if _provider == "local":
+        if _provider == "local" or _remote_is_loopback_llamacpp():   # LOCAL PATCH: native grammar for local llama-swap
             payload["response_format"] = {"type": "json_object", "schema": json_schema}
         elif _provider in ("remote", "openai") and remote_json_schema:
             response_format = _openai_structured_response_format(json_schema)
