@@ -46,6 +46,64 @@ _STANDALONE_NOMINAL_PRESENTATION_RE = re.compile(
     r"(?:movement|motion|action))?",
     re.IGNORECASE,
 )
+# Production metadata that briefs for Shorts/news/explainers routinely contain.
+# Like _STANDALONE_NOMINAL_PRESENTATION_RE these are small full-match grammars:
+# they describe the work, its soundtrack or a global casting rule, and nobody
+# performs them in a shot. Text with a subject and a narrative predicate never
+# matches, so physical events ("A rocket lifts off") stay source events.
+_FORMAT_DESCRIPTOR_RE = re.compile(
+    r"(?:a|an|one|our|this)\s+"
+    r"(?:(?:\d+(?:\.\d+)?\s*(?:-|\s)?\s*(?:second|sec|s|minute|min)s?(?:\s*-\s*|\s+)?"
+    r"(?:long\s+)?)|(?:\d+\s*:\s*\d+\s+))?"
+    r"(?:[\w'’&/:-]+\s+){0,6}?"
+    r"(?:youtube\s+|instagram\s+|tiktok\s+)?"
+    r"(?:short|shorts|reel|reels|video|film|clip|ad|advert|commercial|trailer|"
+    r"episode|promo|explainer|bulletin|segment|news\s+story)"
+    r"(?:\s+(?:for|about)\s+(?:the\s+|our\s+)?[^,;]{1,60})?"
+    r"(?:\s*,\s*in\s+[^,;]{1,60}?\s+style)?",
+    re.IGNORECASE,
+)
+_SOUND_ITEM = (
+    r"(?:(?!(?:he|she|it|they|we|i|you|who|which|that)\b)[\w'’-]+\s+){0,4}"
+    r"(?:roar|hum|rumble|whoosh|beep|chime|bell|bells|music|score|soundtrack|"
+    r"ambience|ambiance|sfx|sound\s+effects?|noise|voice-?over|narration|jingle|sting)"
+)
+# A soundtrack note is a list (two or more items) or an explicit "with ..." tail;
+# a single noun phrase ending in a sound word may be a performed action.
+_SOUND_ONLY_LIST_RE = re.compile(
+    rf"with\s+{_SOUND_ITEM}(?:\s*(?:,|and|plus|&)\s*(?:and\s+)?{_SOUND_ITEM})*"
+    rf"|{_SOUND_ITEM}(?:\s*(?:,|and|plus|&)\s*(?:and\s+)?{_SOUND_ITEM})+",
+    re.IGNORECASE,
+)
+_GLOBAL_CAST_RULE_RE = re.compile(
+    r"(?:(?:the|any|all|every|no)\s+)?(?:[\w'’-]+\s+){0,4}?"
+    r"(?:is|are)\s+the\s+only\s+(?:speaker|speakers|voice|voices|narrator|"
+    r"speaking\s+(?:character|voice))\b.*"
+    r"|(?:(?:the|any|all|every)\s+)?(?:[\w'’-]+\s+){0,4}?"
+    r"(?:appears?|are\s+shown|is\s+shown)\s+only\s+as\b.*",
+    re.IGNORECASE,
+)
+
+
+def _is_production_metadata(text: str) -> bool:
+    """Exclude format, soundtrack and global casting notes from action IDs.
+
+    LOCAL PATCH (news-Short briefs): "A 24-second vertical space-news Short
+    for the channel X", "Rocket roar, station hum and light upbeat music" and
+    "The alien is the only speaker" were each allocated an immutable event that
+    no shot can visibly perform, so every planner failed the exactly-once check.
+    """
+
+    value = str(text or "").strip(" \t\r\n-.,;:!?")
+    if not value:
+        return False
+    return bool(
+        _FORMAT_DESCRIPTOR_RE.fullmatch(value)
+        or _SOUND_ONLY_LIST_RE.fullmatch(value)
+        or _GLOBAL_CAST_RULE_RE.fullmatch(value)
+    )
+
+
 _REFERENCE_CHARACTER_SELECTION_RE = re.compile(
     r"^(?:please\s+)?use\s+(?:the\s+)?"
     r"(?:[a-z0-9][a-z0-9'’\-]*\s+){0,6}"
@@ -420,7 +478,7 @@ def build_source_contract(source: str) -> dict:
             r"(?:preserve|maintain|keep|avoid|never|do not|no\b|"
             r"(?:picture|image|reference)\s*\d*\s+(?:supplies|provides|defines|is for))\b",
             text, re.IGNORECASE,
-        ) or _is_standalone_nominal_presentation_direction(text):
+        ) or _is_standalone_nominal_presentation_direction(text) or _is_production_metadata(text):
             continue
         events.append({"event_id": f"E{len(events) + 1}", "text": text})
     return {"revision": 1, "events": events, "audio_policy": policy}
