@@ -141,6 +141,126 @@ def _insert_before_speech(prompt: str, source_text: str) -> str:
     return head + tail
 
 
+_NAMED_CUE_RE = re.compile(
+    r"^shot (\d+) explicit named-actor (takeoff|landing|feet-on-ground) cue requires "
+    r"closing grounded='(\w+)' for '(.+)'$", re.I,
+)
+_OPENING_OMITS_RE = re.compile(r"^shot (\d+) opening physical_state omits carried fact '(.+) (\w+)'$", re.I)
+_CLOSING_OMITS_RE = re.compile(r"^shot (\d+) closing physical_state omits (.+) (\w+)$", re.I)
+_CLOSING_INTRODUCES_RE = re.compile(
+    r"^shot (\d+) closing introduces (.+) (\w+) without an opening fact or transition$", re.I,
+)
+
+
+def _state(row: dict) -> dict:
+    state = row.get("physical_state")
+    if not isinstance(state, dict):
+        state = {}
+    for key in ("opening", "transitions", "closing"):
+        if not isinstance(state.get(key), list):
+            state[key] = []
+    row["physical_state"] = state
+    return state
+
+
+def _find(facts: list, subject: str, predicate: str) -> dict | None:
+    key = subject.strip().casefold()
+    return next((f for f in facts if isinstance(f, dict)
+                 and str(f.get("subject_id", "")).strip().casefold() == key
+                 and f.get("predicate") == predicate), None)
+
+
+def _current_value(state: dict, subject: str, predicate: str) -> str | None:
+    value = None
+    opening = _find(state["opening"], subject, predicate)
+    if opening is not None:
+        value = opening.get("value")
+    for transition in state["transitions"]:
+        if (isinstance(transition, dict)
+                and str(transition.get("subject_id", "")).strip().casefold() == subject.strip().casefold()
+                and transition.get("predicate") == predicate):
+            value = transition.get("to_value")
+    return value
+
+
+def reconcile_physical_ledger(rows: list[dict], issues: list[str], events_by_shot: list[list[dict]]) -> bool:
+    """Apply mechanical ledger fixes for the recognised issue messages.
+
+    Returns True when at least one fix was applied. Only these bookkeeping
+    messages are handled; everything else is left for the validators to reject.
+    """
+
+    changed = False
+    for issue in issues:
+        text = issue.strip()
+        if m := _NAMED_CUE_RE.match(text):
+            index, family, expected, subject = int(m.group(1)) - 1, m.group(2).lower(), m.group(3).lower(), m.group(4)
+            if not 0 <= index < len(rows):
+                continue
+            state = _state(rows[index])
+            start = "grounded" if expected == "airborne" else "airborne"
+            establishes = any(
+                isinstance(t, dict) and str(t.get("subject_id", "")).strip().casefold() == subject.strip().casefold()
+                and t.get("predicate") == "grounded" and t.get("operation") == "establish"
+                for t in state["transitions"])
+            if _find(state["opening"], subject, "grounded") is None and not establishes:
+                first = next((t for t in state["transitions"] if isinstance(t, dict)
+                              and str(t.get("subject_id", "")).strip().casefold() == subject.strip().casefold()
+                              and t.get("predicate") == "grounded"), None)
+                opening_value = (first or {}).get("from_value") or start
+                state["opening"].append({"subject_id": subject, "predicate": "grounded", "value": opening_value})
+            if _current_value(state, subject, "grounded") != expected:
+                action = next((e["text"] for e in events_by_shot[index]), f"{subject} {family}")
+                state["transitions"].append({
+                    "subject_id": subject, "predicate": "grounded",
+                    "from_value": _current_value(state, subject, "grounded") or start,
+                    "to_value": expected, "action": action[:160],
+                })
+            closing = _find(state["closing"], subject, "grounded")
+            if closing is None:
+                state["closing"].append({"subject_id": subject, "predicate": "grounded", "value": expected})
+            else:
+                closing["value"] = expected
+            changed = True
+        elif m := _OPENING_OMITS_RE.match(text):
+            index, subject, predicate = int(m.group(1)) - 1, m.group(2), m.group(3)
+            if not 1 <= index < len(rows):
+                continue
+            previous = _state(rows[index - 1])
+            prior = _find(previous["closing"], subject, predicate)
+            if prior is None:
+                continue
+            state = _state(rows[index])
+            if _find(state["opening"], subject, predicate) is None:
+                state["opening"].append({"subject_id": prior["subject_id"], "predicate": predicate,
+                                         "value": prior.get("value")})
+                changed = True
+        elif m := _CLOSING_OMITS_RE.match(text):
+            index, subject, predicate = int(m.group(1)) - 1, m.group(2), m.group(3)
+            if not 0 <= index < len(rows):
+                continue
+            state = _state(rows[index])
+            value = _current_value(state, subject, predicate)
+            if value is None:
+                # carried from the previous shot without being restated
+                if index > 0:
+                    prior = _find(_state(rows[index - 1])["closing"], subject, predicate)
+                    value = prior.get("value") if prior else None
+            if value is not None and _find(state["closing"], subject, predicate) is None:
+                state["closing"].append({"subject_id": subject, "predicate": predicate, "value": value})
+                changed = True
+        elif m := _CLOSING_INTRODUCES_RE.match(text):
+            index, subject, predicate = int(m.group(1)) - 1, m.group(2), m.group(3)
+            if not 0 <= index < len(rows):
+                continue
+            state = _state(rows[index])
+            fact = _find(state["closing"], subject, predicate)
+            if fact is not None:
+                state["closing"].remove(fact)
+                changed = True
+    return changed
+
+
 def reallocate_source_events(rows: list[dict], contract: dict) -> list[dict]:
     """Return a copy of rows with a valid, story-ordered source allocation."""
 
@@ -174,4 +294,14 @@ def reallocate_source_events(rows: list[dict], contract: dict) -> list[dict]:
         for event in assigned[index]:
             prompt = _insert_before_speech(prompt, event["text"])
         row["video_prompt"] = prompt
+
+    # Mechanical physical-ledger bookkeeping, re-validated after every pass.
+    from .physical_continuity import validate_physical_state_sequence
+    from .source_contract import source_contract_issues
+
+    for _ in range(4):
+        remaining = source_contract_issues(rows, contract, require_ids=True)
+        remaining.extend(validate_physical_state_sequence(rows))
+        if not remaining or not reconcile_physical_ledger(rows, remaining, assigned):
+            break
     return rows
