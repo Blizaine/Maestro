@@ -278,6 +278,33 @@ class DirectorStoryContractRecoveryTests(unittest.TestCase):
         rows = _three_shots()
         issues = ["Source actions must be allocated exactly once in source order"]
 
+        # LOCAL PATCH: after two invalid LLM patches the deterministic fallback
+        # owns the result; it must match what a valid repair produces.
+        repaired, _ = planner._repair_h3_source_physical_plan(
+            rows,
+            _source_contract(),
+            issues,
+            planner_token_budget=4096,
+            request_budget=2,
+        )
+        self.assertEqual(len(planner.calls), 2)
+        self.assertEqual([row["source_event_ids"] for row in repaired], [["E1"], [], []])
+        self.assertEqual(validate_physical_state_sequence(repaired), [])
+        posture = lambda facts: [f["value"] for f in facts if f["predicate"] == "posture"]
+        self.assertEqual(posture(repaired[0]["physical_state"]["opening"]), ["standing"])
+        self.assertEqual(posture(repaired[0]["physical_state"]["closing"]), ["seated"])
+        for row in repaired[1:]:
+            self.assertEqual(posture(row["physical_state"]["opening"]), ["seated"])
+            self.assertEqual(posture(row["physical_state"]["closing"]), ["seated"])
+
+    def test_unfixable_state_still_fails_after_invalid_compact_proposals(self):
+        invalid = _compact_patch()
+        invalid["event_shots"]["E1"] = 4
+        planner = _SequencePlanner([invalid, invalid])
+        rows = _three_shots()
+        rows[0]["physical_state"]["opening"][0]["value"] = "flying"
+        issues = ["Source actions must be allocated exactly once in source order"]
+
         with self.assertRaisesRegex(RuntimeError, "could not repair the source/physical contract"):
             planner._repair_h3_source_physical_plan(
                 rows,
@@ -286,7 +313,6 @@ class DirectorStoryContractRecoveryTests(unittest.TestCase):
                 planner_token_budget=4096,
                 request_budget=2,
             )
-
         self.assertEqual(len(planner.calls), 2)
 
     def test_legacy_plan_without_source_ids_does_not_use_focused_patch(self):
