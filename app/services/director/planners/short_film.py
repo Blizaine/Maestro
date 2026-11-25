@@ -1182,6 +1182,43 @@ def _h3_screenplay_speaker_heading(value: Any) -> tuple[str, bool] | None:
     return (_normalize_h3_text(name), False) if name else None
 
 
+
+_H3_GRAPHIC_SPEAKER_RE = re.compile(
+    r"(?:opening\s+|closing\s+|end\s+|title\s+|intro\s+|outro\s+)?"
+    r"(?:title|end|intro|outro|lower[\s-]*third|caption|subtitle|super|graphic|"
+    r"on[\s-]*screen\s+text|text\s+overlay|card)s?(?:\s+cards?)?",
+    re.IGNORECASE,
+)
+_H3_GRAPHIC_FIELDS_RE = re.compile(
+    r"(?:\*\*\s*)?\b(?:text|subtitle|title|role|caption|font|style|logo)\s*:\s*(?:\*\*)?",
+    re.IGNORECASE,
+)
+
+
+def _is_h3_onscreen_graphic_turn(speaker_name: Any, raw_text: str) -> bool:
+    """True for title/end-card or caption blocks parsed as a speaker."""
+
+    name = str(speaker_name or "").strip(" *_:-").strip()
+    if name and _H3_GRAPHIC_SPEAKER_RE.fullmatch(name):
+        return True
+    fields = _H3_GRAPHIC_FIELDS_RE.findall(str(raw_text or ""))
+    return len(fields) >= 2 and "**" in str(raw_text or "")
+
+
+_H3_SCENE_HEADING_TEXT_RE = re.compile(
+    r"[*_#\s]*(?:INT|EXT|INT\s*/\s*EXT|I\s*/\s*E|EST)\.?\s+[^\n]{1,120}?"
+    r"(?:\s+-\s+(?:DAY|NIGHT|MORNING|EVENING|DAWN|DUSK|CONTINUOUS|LATER|SAME))?[*_\s.]*",
+)
+
+
+def _is_h3_scene_heading_turn(raw_text: str) -> bool:
+    """True when the whole 'spoken' text is a screenplay slugline."""
+
+    text = str(raw_text or "").strip()
+    return bool(text) and bool(re.match(r"[*_#\s]*(?:INT|EXT|I/E|EST)\b", text)) and bool(
+        _H3_SCENE_HEADING_TEXT_RE.fullmatch(text)
+    )
+
 def _extract_h3_screenplay_dialogue(screenplay: Any) -> list[dict[str, str]]:
     """Extract the immutable speaker/word stream from Pass 1 screenplay text.
 
@@ -1233,6 +1270,17 @@ def _extract_h3_screenplay_dialogue(screenplay: Any) -> list[dict[str, str]]:
             spoken_lines.append(dialogue)
             index += 1
         spoken = _h3_plain_dialogue_text(" ".join(spoken_lines))
+        if spoken and _is_h3_scene_heading_turn(" ".join(spoken_lines)):
+            # "**INT. NEWS DESK - DAY**" under a speaker heading is a
+            # (Markdown-bolded) slugline, not speech.
+            print(f"[ShortFilmPlanner] Ignored scene heading under {speaker_name!r} as dialogue.")
+            continue
+        if spoken and _is_h3_onscreen_graphic_turn(speaker_name, " ".join(spoken_lines)):
+            # a screenplay "TITLE CARD"/"END CARD" block with
+            # Markdown fields (**text:**, **subtitle:**) is on-screen graphics,
+            # not speech; H3 voiced "text <title> subtitle ..." otherwise.
+            print(f"[ShortFilmPlanner] Ignored on-screen graphic block {speaker_name!r} as dialogue.")
+            continue
         if spoken:
             manifest.append({
                 "speaker_name": speaker_name,
@@ -9978,6 +10026,12 @@ SCREENPLAY:
                     "with validator feedback."
                 )
 
+        # like music-video source compilation, fall back to a
+        # deterministic, story-ordered event allocation before aborting. The
+        # unchanged validators still decide; physical-state issues still fail.
+        fallback_rows, fallback_issues = _source_allocation_fallback(rows, source_contract)
+        if not fallback_issues:
+            return fallback_rows, request_budget
         raise RuntimeError(
             "MiniMax H3 could not repair the source/physical contract: "
             + "; ".join(patch_issues)
@@ -11101,6 +11155,11 @@ description with the locked dialogue in video_prompt."""
                 shot_dicts, source_contract, require_ids=True,
             )
             semantic_issues.extend(validate_physical_state_sequence(shot_dicts))
+        if semantic_issues and source_contract_active:
+            # deterministic allocation fallback (see above).
+            fallback_rows, fallback_issues = _source_allocation_fallback(shot_dicts, source_contract)
+            if not fallback_issues:
+                shot_dicts, semantic_issues = fallback_rows, []
         if semantic_issues:
             raise RuntimeError("H3 story/physical plan did not validate after its bounded repair: "
                                + "; ".join(semantic_issues) + ". No video jobs were queued.")
@@ -11446,3 +11505,28 @@ Go:"""
         title = shot_dicts[0].get("title") if shot_dicts else None
         self._last_title = title
         return shots, title
+
+
+def _source_allocation_fallback(rows, source_contract):
+    """deterministic source-event ownership after LLM repairs fail.
+
+    Returns (rows, remaining_issues). Rows are only used when no issue remains
+    under the same validators the planner already applies.
+    """
+    from ..source_allocation_fallback import reallocate_source_events
+
+    try:
+        candidate = reallocate_source_events(rows, source_contract)
+    except Exception as error:  # never mask the original planner error
+        print(f"[ShortFilmPlanner] Source allocation fallback failed: {error}")
+        return rows, ["fallback error"]
+    issues = source_contract_issues(candidate, source_contract, require_ids=True)
+    issues.extend(validate_physical_state_sequence(candidate))
+    if issues:
+        print("[ShortFilmPlanner] Deterministic source allocation fallback still invalid: "
+              + "; ".join(issues[:6]))
+    else:
+        print("[ShortFilmPlanner] LLM source/physical repairs failed; deterministic "
+              "story-ordered source allocation validated with the unchanged checks: "
+              + ", ".join(f"shot {i + 1}={row.get('source_event_ids')}" for i, row in enumerate(candidate)))
+    return candidate, issues
