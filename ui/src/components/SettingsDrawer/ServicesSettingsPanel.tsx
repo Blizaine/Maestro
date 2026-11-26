@@ -250,11 +250,10 @@ export function ServicesSettingsPanel() {
     }
   }
 
-  // Filter models by current provider (show local + remote of current provider)
+  // A provider switch must not keep a stale model from another provider.
   const filteredModels = llmModels.filter(m => {
     const mp = (m as { provider?: string }).provider || 'local'
-    if (isLocal) return mp === 'local'
-    return mp === 'local' || mp === provider
+    return mp === provider
   })
 
   return (
