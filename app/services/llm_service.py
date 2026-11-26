@@ -64,6 +64,20 @@ _provider: str = "local"
 _remote_url: str = ""       # Base URL for remote/OpenAI-compatible servers
 _api_key: str = ""           # API key for OpenAI/Anthropic
 
+OPENAI_API_BASE_URL = "https://api.openai.com"
+
+
+def _provider_base_url(provider: str, remote_url: str) -> str:
+    """Resolve the configured base URL for an OpenAI-compatible provider."""
+
+    provider_name = str(provider or "").lower()
+    configured_url = str(remote_url or "").strip().rstrip("/")
+    if provider_name == "openai":
+        return configured_url or OPENAI_API_BASE_URL
+    if provider_name == "remote":
+        return configured_url
+    return ""
+
 # Auto-unload idle timer
 _idle_timer: Optional[threading.Timer] = None
 _idle_timeout: float = 60.0  # seconds before auto-unload
@@ -670,8 +684,11 @@ def get_available_models(provider: str = "local", remote_url: str = "", api_key:
     """Return list of available LLM model options for the UI.
 
     For local provider, returns the curated built-in catalog
-    (_PUBLIC_MODEL_ORDER). For remote/openai, queries the server's
+    (_PUBLIC_MODEL_ORDER). For remote/openai, queries the provider's
     /v1/models endpoint. For anthropic, returns a curated Claude list.
+
+    Each provider receives only its own models. In particular, a stale local
+    GGUF selection must not remain valid after switching to a hosted provider.
     """
     local_models = [
         {
@@ -685,16 +702,25 @@ def get_available_models(provider: str = "local", remote_url: str = "", api_key:
         if repo_id in MODEL_REGISTRY
     ]
 
+    provider = str(provider or "local").lower()
+    if provider == "local":
+        return local_models
+
     remote_models: list[dict] = []
 
-    # Query remote OpenAI-compatible server (LM Studio, etc.)
-    if provider in ("remote", "openai") and remote_url:
+    # Query remote OpenAI-compatible server (LM Studio, etc.). OpenAI's
+    # documented endpoint is used when its optional base URL is blank.
+    if provider in ("remote", "openai"):
+        base_url = _provider_base_url(provider, remote_url)
+        if not base_url:
+            if provider == "remote":
+                print("[LLM] Remote provider requires a server URL before models can be listed")
+            return remote_models
         try:
             headers = {}
             if api_key:
                 headers["Authorization"] = f"Bearer {api_key}"
-            url = remote_url.rstrip("/")
-            resp = requests.get(f"{url}/v1/models", headers=headers, timeout=10)
+            resp = requests.get(f"{base_url}/v1/models", headers=headers, timeout=10)
             if resp.ok:
                 data = resp.json()
                 for m in data.get("data", []):
@@ -707,7 +733,9 @@ def get_available_models(provider: str = "local", remote_url: str = "", api_key:
                             "provider": provider,
                         })
         except Exception as e:
-            print(f"[LLM] Failed to query remote models at {remote_url}: {e}")
+            print(f"[LLM] Failed to query {provider} models at {base_url}: {e}")
+
+        return remote_models
 
     # Anthropic models (curated list — no /models endpoint)
     if provider == "anthropic" and api_key:
@@ -716,7 +744,7 @@ def get_available_models(provider: str = "local", remote_url: str = "", api_key:
             {"id": "claude-haiku-4-5-20251001", "label": "Claude Haiku 4.5", "size_hint": "anthropic", "provider": "anthropic"},
         ])
 
-    return local_models + remote_models
+    return remote_models
 
 
 def _find_free_port() -> int:
@@ -826,7 +854,9 @@ def _finalize_payload(payload: dict) -> dict:
     if _provider not in ("remote", "openai"):
         return record_payload(payload, model_id=_model_id, command=getattr(_process, "args", None))
     try:
-        endpoint_host = (urlparse(str(_remote_url or "")).hostname or "").lower()
+        endpoint_host = (
+            urlparse(_provider_base_url(_provider, _remote_url)).hostname or ""
+        ).lower()
     except (TypeError, ValueError):
         endpoint_host = ""
     provider_unsupported_fields = set()
@@ -846,6 +876,10 @@ def _finalize_payload(payload: dict) -> dict:
         for key, value in payload.items()
         if key in _OPENAI_CHAT_FIELDS and key not in provider_unsupported_fields
     }
+    if _provider == "openai" and endpoint_host == "api.openai.com":
+        max_tokens = prepared.pop("max_tokens", None)
+        if max_tokens is not None:
+            prepared.setdefault("max_completion_tokens", max_tokens)
     dropped = sorted(set(payload) - set(prepared))
     if dropped:
         print(
@@ -857,8 +891,13 @@ def _finalize_payload(payload: dict) -> dict:
 
 
 def _server_url() -> str:
-    if _provider in ("remote", "openai") and _remote_url:
-        return _remote_url.rstrip("/")
+    if _provider in ("remote", "openai"):
+        base_url = _provider_base_url(_provider, _remote_url)
+        if not base_url:
+            raise RuntimeError(
+                "The Remote OpenAI-Compatible provider requires a server URL."
+            )
+        return base_url
     return f"http://127.0.0.1:{_server_port}"
 
 
@@ -1994,10 +2033,25 @@ def load_model(
 
     # Handle remote/API providers — no subprocess needed
     if provider in ("remote", "openai", "anthropic"):
+        selected_model = str(model_id or "").strip()
+        if not selected_model:
+            raise ValueError(
+                f"Select a model for the {provider} provider before loading it."
+            )
+        if selected_model in MODEL_REGISTRY:
+            raise ValueError(
+                f"The {provider} provider cannot use local model "
+                f"'{selected_model}'. Choose a model returned by that provider."
+            )
+        remote_url = _provider_base_url(provider, remote_url)
+        if provider == "remote" and not remote_url:
+            raise ValueError(
+                "The Remote OpenAI-Compatible provider requires a server URL."
+            )
         with _lock:
             if (
                 is_loaded()
-                and _model_id == model_id
+                and _model_id == selected_model
                 and _provider == provider
                 and _remote_url == remote_url
                 and _api_key == api_key
@@ -2011,13 +2065,16 @@ def load_model(
             _provider = provider
             _remote_url = remote_url
             _api_key = api_key
-            _model_id = model_id
+            _model_id = selected_model
             _device = provider
             # Remote capability is not discoverable from the provider-neutral
             # model ID. Send image inputs and let the provider report when a
             # selected model does not accept them.
             _vision_available = True
-            print(f"[LLM] Connected to {provider} provider: model={model_id}, url={remote_url or 'API'}")
+            print(
+                f"[LLM] Connected to {provider} provider: model={selected_model}, "
+                f"url={remote_url or 'API'}"
+            )
             _reset_idle_timer()
         return
 

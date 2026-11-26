@@ -7,7 +7,7 @@ import os
 import sys
 import unittest
 from contextlib import ExitStack
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import requests
 
@@ -157,6 +157,60 @@ class TestFinalizePayload(unittest.TestCase):
             self.assertEqual(output["frequency_penalty"], 0.3)
             self.assertEqual(output["presence_penalty"], 0.2)
 
+    def test_blank_openai_base_url_uses_public_endpoint(self):
+        llm_service._provider = "openai"
+        self.assertEqual(llm_service._server_url(), "https://api.openai.com")
+
+    def test_public_openai_endpoint_uses_completion_token_field(self):
+        output = self._finalize("openai", _llama_payload())
+        self.assertEqual(output["max_completion_tokens"], 1024)
+        self.assertNotIn("max_tokens", output)
+
+
+class TestProviderModelCatalog(unittest.TestCase):
+    def test_settings_panel_filters_models_to_the_selected_provider(self):
+        panel_path = os.path.join(
+            _ROOT, "ui", "src", "components", "SettingsDrawer",
+            "ServicesSettingsPanel.tsx",
+        )
+        with open(panel_path, encoding="utf-8") as handle:
+            source = handle.read()
+        self.assertIn("return mp === provider", source)
+        self.assertNotIn("return mp === 'local' || mp === provider", source)
+
+    def test_local_and_anthropic_catalogs_are_provider_specific(self):
+        local = llm_service.get_available_models(provider="local")
+        anthropic = llm_service.get_available_models(
+            provider="anthropic", api_key="sk-anthropic"
+        )
+        self.assertTrue(local)
+        self.assertTrue(anthropic)
+        self.assertTrue(all(model["provider"] == "local" for model in local))
+        self.assertTrue(all(model["provider"] == "anthropic" for model in anthropic))
+
+    def test_openai_blank_base_url_queries_default_and_excludes_local_models(self):
+        response = Mock(ok=True)
+        response.json.return_value = {"data": [{"id": "gpt-5"}]}
+        with patch.object(llm_service.requests, "get", return_value=response) as get:
+            models = llm_service.get_available_models(
+                provider="openai", api_key="sk-openai"
+            )
+
+        get.assert_called_once_with(
+            "https://api.openai.com/v1/models",
+            headers={"Authorization": "Bearer sk-openai"},
+            timeout=10,
+        )
+        self.assertEqual([model["id"] for model in models], ["gpt-5"])
+        self.assertTrue(all(model["provider"] == "openai" for model in models))
+
+    def test_remote_without_a_server_url_has_no_models(self):
+        with patch.object(llm_service.requests, "get") as get:
+            self.assertEqual(
+                llm_service.get_available_models(provider="remote"), []
+            )
+        get.assert_not_called()
+
 
 class TestRemoteFailureDetail(unittest.TestCase):
     def setUp(self):
@@ -266,6 +320,23 @@ class TestRemoteVisionRequests(unittest.TestCase):
                         api_key="test-key",
                     )
                 self.assertTrue(llm_service._vision_available)
+
+    def test_hosted_load_rejects_local_models_and_requires_remote_url(self):
+        with patch.object(llm_service, "_reset_idle_timer"):
+            llm_service.load_model(
+                "gpt-5", provider="openai", remote_url="", api_key="test-key"
+            )
+        self.assertEqual(llm_service._remote_url, "https://api.openai.com")
+
+        local_model = next(iter(llm_service.MODEL_REGISTRY))
+        with self.assertRaisesRegex(ValueError, "cannot use local model"):
+            llm_service.load_model(
+                local_model, provider="openai", remote_url="", api_key="test-key"
+            )
+        with self.assertRaisesRegex(ValueError, "requires a server URL"):
+            llm_service.load_model(
+                "remote-model", provider="remote", remote_url="", api_key="test-key"
+            )
 
     def test_remote_openai_payload_sends_strict_object_schema_without_mutating_it(self):
         schema = {

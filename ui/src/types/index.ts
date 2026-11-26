@@ -1998,6 +1998,7 @@ export interface LlmModelOption {
   id: string
   label: string
   size_hint: string
+  provider?: string
   supports_mtp?: boolean
 }
 
