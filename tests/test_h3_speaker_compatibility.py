@@ -11,6 +11,7 @@ from types import SimpleNamespace
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "app"))
 
 from models.minimax_h3.ref2va import (
+    align_ref2va_voice_reference_order,
     ensure_ref2va_prompt_relationships,
     select_ref2va_window_voice_references,
 )
@@ -47,6 +48,60 @@ def dialogue_spans(source: str) -> list[tuple[int, int, str]]:
 
 
 class H3SpeakerCompatibilityTests(unittest.TestCase):
+    def test_subject_description_can_mention_another_selected_character(self):
+        references = [
+            {"type": "image", "path": f"{name}.png", "character_name": name}
+            for name in ("Alice", "Bob")
+        ]
+        prompt = (
+            "subject_definitions: <Subject 1> is Alice: A woman with long brown hair wearing a red uniform.\n"
+            "<Subject 2> is Bob: A man with short black hair wearing a black uniform, standing beside Alice.\n"
+            "summary: Two characters standing in a futuristic city plaza.\n"
+            "retention_analysis: Preserve both character identities and their clothing.\n"
+            "detailed_description: Alice performs a song while Bob stands silently beside her.\n"
+            "overall_soundscape: Natural scene ambience.\n"
+            "non_diegetic_music: Use the mapped driving audio."
+        )
+        compiled = ensure_ref2va_prompt_relationships(prompt, references)
+        self.assertIn("<Subject 2> is Bob:", compiled)
+        self.assertIn("standing beside Alice", compiled)
+
+    def test_subject_declaration_preserves_identity_and_media_checks(self):
+        references = [
+            {"type": "image", "path": "alice.png", "character_name": "Alice"},
+            {"type": "video", "path": "bob.mp4", "character_name": "Bob", "video_intent": "character"},
+        ]
+        for declaration, expected in (
+            ("is Bob: beside Alice", {3: 2}),
+            ("is Bob: beside Alice, identity from <Video 1>", {3: 2}),
+            ("is Bo: beside Alice", {}),
+            ("is Bob:", {3: 2}),
+        ):
+            with self.subTest(declaration=declaration):
+                prompt = "subject_definitions: <Subject 3> " + declaration
+                _, _, ordinals = align_ref2va_voice_reference_order(prompt, references)
+                self.assertEqual(ordinals.get("Subject", {}), expected)
+
+        for declaration, error in (
+            ("is Alice and Bob: standing together", "ambiguous"),
+            ("is Bob beside Alice", "ambiguous"),
+            ("is Bob: beside Alice from <Picture 1>", "conflict"),
+            ("is Bob: beside Alice from <Video 2>", "missing"),
+        ):
+            with self.subTest(declaration=declaration):
+                prompt = "subject_definitions: <Subject 3> " + declaration
+                with self.assertRaisesRegex(H3SpeakerBindingError, error):
+                    align_ref2va_voice_reference_order(prompt, references)
+
+    def test_declared_name_shared_by_two_references_stays_ambiguous(self):
+        references = [
+            {"type": "image", "path": f"{key}.png", "library_character_id": key,
+             "character_name": "Bob"}
+            for key in ("first", "second")
+        ]
+        with self.assertRaisesRegex(H3SpeakerBindingError, "ambiguous"):
+            align_ref2va_voice_reference_order("subject_definitions: <Subject 3> is Bob: waving.", references)
+
     def test_worker_preflights_later_ref2va_windows_before_render(self):
         source = Path(__file__).resolve().parents[1] / "app" / "launch.py"
         tree = ast.parse(source.read_text(encoding="utf-8"))

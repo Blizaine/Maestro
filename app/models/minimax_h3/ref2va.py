@@ -906,7 +906,13 @@ def _ref2va_subject_definition_bindings(
                 )
             media_targets.add(targets[ordinal])
 
-        name_targets = _ref2va_identity_alias_targets(clause, aliases)
+        # In "<Subject N> is Name: description", the description can mention other characters.
+        declaration = re.match(
+            r"<Subject\s+\d+>\s+(?:\(S\d+\)\s+)?is\s+([^:]*):", clause, re.IGNORECASE,
+        )
+        name_targets = _ref2va_identity_alias_targets(
+            declaration.group(1) if declaration else clause, aliases,
+        )
         if len(media_targets) > 1:
             raise H3SpeakerBindingError(
                 "MiniMax H3 reference binding conflict: "
